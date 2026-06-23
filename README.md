@@ -1,34 +1,43 @@
 # cloudflared-wrapped
 
-Cloudflared tunnel that converges DNS records from `config.yml` on every start.
+Drop-in cloudflared image that converges DNS records from `config.yml` on every start.
 
-## How it works
+On container start, the wrapper reads every `hostname:` from the tunnel's ingress
+config, ensures a matching Cloudflare CNAME exists via the API, then execs
+`cloudflared tunnel run`. DNS sync failures log a warning but do not block the
+tunnel from starting.
 
-On container start, the entrypoint runs `sync.sh` to ensure a Cloudflare CNAME
-exists for every `hostname:` in the tunnel's `config.yml` ingress block, then
-execs `cloudflared tunnel ... run`. DNS sync failures log a warning but do not
-block the tunnel from starting.
+## Image
+
+- Based on `gcr.io/distroless/static` — no shell, same security posture as the official image
+- Two static binaries: `cloudflared` (copied from official) + `cloudflared-wrapped` (Go sync + entrypoint)
+- ~70 MB vs ~103 MB official
 
 ## Modes
 
-- `MODE=incremental` (default): add missing CNAMEs, leave others alone
-- `MODE=complete`: also delete CNAMEs that point at this tunnel but are not in `config.yml`
+- `MODE=incremental` (default): create missing CNAMEs, leave others alone
+- `MODE=complete`: also delete CNAMEs that point at this tunnel but are not in config
 
 ## Required env
 
 - `CF_API_TOKEN` — Cloudflare API token with `Zone:DNS:Edit` on the target zone
 - `CF_ZONE_ID` — Cloudflare zone ID
 
+## Optional env
+
+- `MODE` — `incremental` (default) or `complete`
+- `CONFIG_PATH` — path to config.yml (default: `/etc/cloudflared/config.yml`)
+
 ## Required mounts
 
-- `/etc/cloudflared/config.yml` — tunnel config (must contain `tunnel:` UUID and `ingress:` list)
+- `/etc/cloudflared/config.yml` — tunnel config with `tunnel:` UUID and `ingress:` list
 - `/etc/cloudflared/credentials.json` — tunnel credentials
 
 ## Compose snippet
 
 ```yaml
   cloudflared:
-    build: ./cloudflared-wrapped
+    image: ghcr.io/sorenguldmund/cloudflared-wrapped:latest
     container_name: cloudflared
     restart: unless-stopped
     environment:
@@ -44,5 +53,5 @@ block the tunnel from starting.
 ## Deploy workflow
 
 1. Edit `cloudflared/data/config.yml` — add/remove ingress entries
-2. `docker compose up -d --build cloudflared` (or `restart` if no image rebuild needed)
+2. `docker compose restart cloudflared`
 3. For a pruning deploy: `CF_SYNC_MODE=complete docker compose up -d --force-recreate cloudflared`
