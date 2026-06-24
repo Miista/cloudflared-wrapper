@@ -35,6 +35,24 @@ type apiResponse struct {
 	} `json:"errors"`
 }
 
+type apiStatus struct {
+	Success bool `json:"success"`
+	Errors  []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+func checkStatus(resp []byte) error {
+	var s apiStatus
+	if err := json.Unmarshal(resp, &s); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+	if !s.Success {
+		return fmt.Errorf("api error: %v", s.Errors)
+	}
+	return nil
+}
+
 type createPayload struct {
 	Type    string `json:"type"`
 	Name    string `json:"name"`
@@ -353,15 +371,7 @@ func createRecord(token, zoneID, hostname, target string) error {
 	if err != nil {
 		return err
 	}
-
-	var apiResp apiResponse
-	if err := json.Unmarshal(resp, &apiResp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-	if !apiResp.Success {
-		return fmt.Errorf("api error: %v", apiResp.Errors)
-	}
-	return nil
+	return checkStatus(resp)
 }
 
 func deleteRecord(token, zoneID, recordID string) error {
@@ -371,15 +381,7 @@ func deleteRecord(token, zoneID, recordID string) error {
 	if err != nil {
 		return err
 	}
-
-	var apiResp apiResponse
-	if err := json.Unmarshal(resp, &apiResp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-	if !apiResp.Success {
-		return fmt.Errorf("api error: %v", apiResp.Errors)
-	}
-	return nil
+	return checkStatus(resp)
 }
 
 func cfRequest(method, url, token string, body []byte) ([]byte, error) {
