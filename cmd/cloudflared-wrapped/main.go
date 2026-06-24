@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,25 +45,42 @@ type createPayload struct {
 
 func main() {
 	configPath := envOr("CONFIG_PATH", "/etc/cloudflared/config.yml")
+	credsPath := envOr("CREDENTIALS_DIR", "/etc/cloudflared") + "/credentials.json"
+	tunnelName := os.Getenv("TUNNEL_NAME")
 	apiToken := os.Getenv("CF_API_TOKEN")
+	accountID := os.Getenv("CF_ACCOUNT_ID")
 	zoneID := os.Getenv("CF_ZONE_ID")
 	mode := envOr("MODE", "incremental")
 
+	tunnelID := ""
+	if tunnelName != "" && apiToken != "" && accountID != "" {
+		id, err := ensureTunnel(apiToken, accountID, tunnelName, credsPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[tunnel] WARN: ensure failed: %v\n", err)
+		} else {
+			tunnelID = id
+		}
+	}
+
 	if apiToken == "" || zoneID == "" {
 		fmt.Println("[sync] skipped (CF_API_TOKEN/CF_ZONE_ID not set)")
-		execCloudflared(configPath)
+		execCloudflared(configPath, tunnelID, credsPath)
 	}
 
 	cfg, err := parseConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sync] WARN: failed to parse config: %v\n", err)
-		execCloudflared(configPath)
+		execCloudflared(configPath, tunnelID, credsPath)
 	}
 
-	target := cfg.Tunnel + ".cfargotunnel.com"
+	syncTunnelID := tunnelID
+	if syncTunnelID == "" {
+		syncTunnelID = cfg.Tunnel
+	}
+	target := syncTunnelID + ".cfargotunnel.com"
 	desired := desiredHostnames(cfg)
 
-	fmt.Printf("[sync] tunnel=%s mode=%s hostnames=%d\n", cfg.Tunnel, mode, len(desired))
+	fmt.Printf("[sync] tunnel=%s mode=%s hostnames=%d\n", syncTunnelID, mode, len(desired))
 
 	start := time.Now()
 	if err := sync(apiToken, zoneID, target, desired, mode); err != nil {
@@ -70,7 +89,160 @@ func main() {
 		fmt.Printf("[sync] dns sync ok in %s\n", time.Since(start).Round(time.Millisecond))
 	}
 
-	execCloudflared(configPath)
+	execCloudflared(configPath, tunnelID, credsPath)
+}
+
+type credentials struct {
+	AccountTag   string `json:"AccountTag"`
+	TunnelID     string `json:"TunnelID"`
+	TunnelName   string `json:"TunnelName"`
+	TunnelSecret string `json:"TunnelSecret"`
+}
+
+func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
+	if data, err := os.ReadFile(credsPath); err == nil {
+		var c credentials
+		if err := json.Unmarshal(data, &c); err == nil && c.TunnelID != "" {
+			fmt.Printf("[tunnel] using existing credentials.json tunnel=%s\n", c.TunnelID)
+			return c.TunnelID, nil
+		}
+	}
+
+	id, accountTag, err := lookupTunnel(token, accountID, name)
+	if err != nil {
+		return "", fmt.Errorf("lookup: %w", err)
+	}
+
+	if id != "" {
+		fmt.Printf("[tunnel] adopting existing tunnel name=%s id=%s\n", name, id)
+		secret, err := fetchTunnelSecret(token, accountID, id)
+		if err != nil {
+			return "", fmt.Errorf("fetch token: %w", err)
+		}
+		if err := writeCredentials(credsPath, credentials{accountTag, id, name, secret}); err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+
+	fmt.Printf("[tunnel] creating new tunnel name=%s\n", name)
+	id, accountTag, secret, err := createTunnel(token, accountID, name)
+	if err != nil {
+		return "", fmt.Errorf("create: %w", err)
+	}
+	if err := writeCredentials(credsPath, credentials{accountTag, id, name, secret}); err != nil {
+		return "", err
+	}
+	fmt.Printf("[tunnel] created tunnel id=%s\n", id)
+	return id, nil
+}
+
+func lookupTunnel(token, accountID, name string) (id, accountTag string, err error) {
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel?name=%s&is_deleted=false", accountID, name)
+	resp, err := cfRequest("GET", url, token, nil)
+	if err != nil {
+		return "", "", err
+	}
+	var parsed struct {
+		Success bool `json:"success"`
+		Result  []struct {
+			ID         string `json:"id"`
+			AccountTag string `json:"account_tag"`
+		} `json:"result"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil {
+		return "", "", fmt.Errorf("parse response: %w", err)
+	}
+	if !parsed.Success {
+		return "", "", fmt.Errorf("api error: %v", parsed.Errors)
+	}
+	if len(parsed.Result) == 0 {
+		return "", "", nil
+	}
+	return parsed.Result[0].ID, parsed.Result[0].AccountTag, nil
+}
+
+func fetchTunnelSecret(token, accountID, tunnelID string) (string, error) {
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel/%s/token", accountID, tunnelID)
+	resp, err := cfRequest("GET", url, token, nil)
+	if err != nil {
+		return "", err
+	}
+	var parsed struct {
+		Success bool   `json:"success"`
+		Result  string `json:"result"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+	if !parsed.Success {
+		return "", fmt.Errorf("api error: %v", parsed.Errors)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(parsed.Result)
+	if err != nil {
+		return "", fmt.Errorf("decode token: %w", err)
+	}
+	var t struct {
+		S string `json:"s"`
+	}
+	if err := json.Unmarshal(decoded, &t); err != nil {
+		return "", fmt.Errorf("parse token: %w", err)
+	}
+	if t.S == "" {
+		return "", fmt.Errorf("token missing secret")
+	}
+	return t.S, nil
+}
+
+func createTunnel(token, accountID, name string) (id, accountTag, secret string, err error) {
+	secretBytes := make([]byte, 32)
+	if _, err := rand.Read(secretBytes); err != nil {
+		return "", "", "", err
+	}
+	secret = base64.StdEncoding.EncodeToString(secretBytes)
+
+	payload, _ := json.Marshal(map[string]string{
+		"name":          name,
+		"tunnel_secret": secret,
+		"config_src":    "local",
+	})
+
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel", accountID)
+	resp, err := cfRequest("POST", url, token, payload)
+	if err != nil {
+		return "", "", "", err
+	}
+	var parsed struct {
+		Success bool `json:"success"`
+		Result  struct {
+			ID         string `json:"id"`
+			AccountTag string `json:"account_tag"`
+		} `json:"result"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil {
+		return "", "", "", fmt.Errorf("parse response: %w", err)
+	}
+	if !parsed.Success {
+		return "", "", "", fmt.Errorf("api error: %v", parsed.Errors)
+	}
+	return parsed.Result.ID, parsed.Result.AccountTag, secret, nil
+}
+
+func writeCredentials(path string, c credentials) error {
+	data, _ := json.MarshalIndent(c, "", "  ")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }
 
 func sync(token, zoneID, target string, desired map[string]bool, mode string) error {
@@ -241,7 +413,7 @@ func cfRequest(method, url, token string, body []byte) ([]byte, error) {
 	return data, nil
 }
 
-func execCloudflared(configPath string) {
+func execCloudflared(configPath, tunnelID, credsPath string) {
 	bin, err := findBinary("cloudflared")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[entrypoint] cloudflared not found: %v\n", err)
@@ -249,7 +421,12 @@ func execCloudflared(configPath string) {
 	}
 
 	fmt.Println("[entrypoint] launching cloudflared tunnel")
-	args := []string{"cloudflared", "tunnel", "--config", configPath, "run"}
+	args := []string{"cloudflared", "tunnel", "--config", configPath}
+	if tunnelID != "" {
+		args = append(args, "--credentials-file", credsPath, "run", tunnelID)
+	} else {
+		args = append(args, "run")
+	}
 	if err := syscall.Exec(bin, args, os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "[entrypoint] exec failed: %v\n", err)
 		os.Exit(1)
