@@ -138,11 +138,14 @@ func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
 	if data, err := os.ReadFile(credsPath); err == nil {
 		var c credentials
 		if err := json.Unmarshal(data, &c); err == nil && c.TunnelID != "" {
-			if c.TunnelName == name {
+			if c.TunnelName != name {
+				fmt.Printf("[tunnel] credentials.json is for tunnel %q but TUNNEL_NAME=%q; switching\n", c.TunnelName, name)
+			} else if !tunnelExists(token, accountID, c.TunnelID) {
+				fmt.Printf("[tunnel] credentials.json tunnel id=%s no longer exists; recreating\n", c.TunnelID)
+			} else {
 				fmt.Printf("[tunnel] Using existing credentials.json tunnel=%s\n", c.TunnelID)
 				return c.TunnelID, nil
 			}
-			fmt.Printf("[tunnel] credentials.json is for tunnel %q but TUNNEL_NAME=%q; switching\n", c.TunnelName, name)
 		}
 	}
 
@@ -173,6 +176,24 @@ func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
 	}
 	fmt.Printf("[tunnel] Created tunnel id=%s\n", id)
 	return id, nil
+}
+
+func tunnelExists(token, accountID, tunnelID string) bool {
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel/%s", accountID, tunnelID)
+	resp, err := cfRequest("GET", url, token, nil)
+	if err != nil {
+		return false
+	}
+	var parsed struct {
+		Success bool `json:"success"`
+		Result  struct {
+			DeletedAt *string `json:"deleted_at"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(resp, &parsed) != nil || !parsed.Success {
+		return false
+	}
+	return parsed.Result.DeletedAt == nil
 }
 
 func lookupTunnel(token, accountID, name string) (id, accountTag string, err error) {
