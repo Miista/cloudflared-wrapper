@@ -91,10 +91,10 @@ func main() {
 	if tunnelName != "" && apiToken != "" && accountID != "" {
 		id, err := ensureTunnel(apiToken, accountID, tunnelName, credsPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[tunnel] WARN: Ensure failed: %v\n", err)
-		} else {
-			tunnelID = id
+			fmt.Fprintf(os.Stderr, "[tunnel] Ensure failed: %v\n", err)
+			os.Exit(1)
 		}
+		tunnelID = id
 	}
 
 	if apiToken == "" || zoneID == "" {
