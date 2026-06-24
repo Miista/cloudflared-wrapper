@@ -138,8 +138,11 @@ func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
 	if data, err := os.ReadFile(credsPath); err == nil {
 		var c credentials
 		if err := json.Unmarshal(data, &c); err == nil && c.TunnelID != "" {
-			fmt.Printf("[tunnel] Using existing credentials.json tunnel=%s\n", c.TunnelID)
-			return c.TunnelID, nil
+			if c.TunnelName == name {
+				fmt.Printf("[tunnel] Using existing credentials.json tunnel=%s\n", c.TunnelID)
+				return c.TunnelID, nil
+			}
+			fmt.Printf("[tunnel] credentials.json is for tunnel %q but TUNNEL_NAME=%q; switching\n", c.TunnelName, name)
 		}
 	}
 
