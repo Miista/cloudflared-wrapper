@@ -23,8 +23,9 @@ type config struct {
 }
 
 type dnsRecord struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
 }
 
 type apiResponse struct {
@@ -38,8 +39,24 @@ type apiResponse struct {
 type apiStatus struct {
 	Success bool `json:"success"`
 	Errors  []struct {
+		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"errors"`
+}
+
+const errCodeRecordAlreadyExists = 81053
+
+func hasErrorCode(resp []byte, code int) bool {
+	var s apiStatus
+	if json.Unmarshal(resp, &s) != nil {
+		return false
+	}
+	for _, e := range s.Errors {
+		if e.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func checkStatus(resp []byte) error {
@@ -74,20 +91,20 @@ func main() {
 	if tunnelName != "" && apiToken != "" && accountID != "" {
 		id, err := ensureTunnel(apiToken, accountID, tunnelName, credsPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[tunnel] WARN: ensure failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "[tunnel] WARN: Ensure failed: %v\n", err)
 		} else {
 			tunnelID = id
 		}
 	}
 
 	if apiToken == "" || zoneID == "" {
-		fmt.Println("[sync] skipped (CF_API_TOKEN/CF_ZONE_ID not set)")
+		fmt.Println("[sync] Skipped (CF_API_TOKEN/CF_ZONE_ID not set)")
 		execCloudflared(configPath, tunnelID, credsPath)
 	}
 
 	cfg, err := parseConfig(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[sync] WARN: failed to parse config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[sync] WARN: Failed to parse config: %v\n", err)
 		execCloudflared(configPath, tunnelID, credsPath)
 	}
 
@@ -102,9 +119,9 @@ func main() {
 
 	start := time.Now()
 	if err := sync(apiToken, zoneID, target, desired, mode); err != nil {
-		fmt.Fprintf(os.Stderr, "[sync] WARN: dns sync failed in %s: %v\n", time.Since(start).Round(time.Millisecond), err)
+		fmt.Fprintf(os.Stderr, "[sync] WARN: DNS sync failed in %s: %v\n", time.Since(start).Round(time.Millisecond), err)
 	} else {
-		fmt.Printf("[sync] dns sync ok in %s\n", time.Since(start).Round(time.Millisecond))
+		fmt.Printf("[sync] DNS sync OK in %s\n", time.Since(start).Round(time.Millisecond))
 	}
 
 	execCloudflared(configPath, tunnelID, credsPath)
@@ -121,7 +138,7 @@ func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
 	if data, err := os.ReadFile(credsPath); err == nil {
 		var c credentials
 		if err := json.Unmarshal(data, &c); err == nil && c.TunnelID != "" {
-			fmt.Printf("[tunnel] using existing credentials.json tunnel=%s\n", c.TunnelID)
+			fmt.Printf("[tunnel] Using existing credentials.json tunnel=%s\n", c.TunnelID)
 			return c.TunnelID, nil
 		}
 	}
@@ -132,7 +149,7 @@ func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
 	}
 
 	if id != "" {
-		fmt.Printf("[tunnel] adopting existing tunnel name=%s id=%s\n", name, id)
+		fmt.Printf("[tunnel] Adopting existing tunnel name=%s id=%s\n", name, id)
 		secret, err := fetchTunnelSecret(token, accountID, id)
 		if err != nil {
 			return "", fmt.Errorf("fetch token: %w", err)
@@ -143,7 +160,7 @@ func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
 		return id, nil
 	}
 
-	fmt.Printf("[tunnel] creating new tunnel name=%s\n", name)
+	fmt.Printf("[tunnel] Creating new tunnel name=%s\n", name)
 	id, accountTag, secret, err := createTunnel(token, accountID, name)
 	if err != nil {
 		return "", fmt.Errorf("create: %w", err)
@@ -151,7 +168,7 @@ func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
 	if err := writeCredentials(credsPath, credentials{accountTag, id, name, secret}); err != nil {
 		return "", err
 	}
-	fmt.Printf("[tunnel] created tunnel id=%s\n", id)
+	fmt.Printf("[tunnel] Created tunnel id=%s\n", id)
 	return id, nil
 }
 
@@ -269,20 +286,27 @@ func sync(token, zoneID, target string, desired map[string]bool, mode string) er
 		return fmt.Errorf("list records: %w", err)
 	}
 
-	var created, ok, errored int
+	var created, updated, ok, errored int
 
 	for host := range desired {
 		if _, exists := existing[host]; exists {
-			fmt.Printf("  ok      %s\n", host)
+			fmt.Printf("  OK      %s\n", host)
 			ok++
-		} else {
-			fmt.Printf("  create  %s\n", host)
-			if err := createRecord(token, zoneID, host, target); err != nil {
-				fmt.Fprintf(os.Stderr, "  ERROR   %s: %v\n", host, err)
-				errored++
-			} else {
-				created++
-			}
+			continue
+		}
+		action, from, err := upsertRecord(token, zoneID, host, target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  ERROR   %s: %v\n", host, err)
+			errored++
+			continue
+		}
+		switch action {
+		case "create":
+			fmt.Printf("  Create  %s\n", host)
+			created++
+		case "update":
+			fmt.Printf("  Update  %s from %s to %s\n", host, from, target)
+			updated++
 		}
 	}
 
@@ -291,7 +315,7 @@ func sync(token, zoneID, target string, desired map[string]bool, mode string) er
 	if mode == "complete" {
 		for host, id := range existing {
 			if !desired[host] {
-				fmt.Printf("  delete  %s\n", host)
+				fmt.Printf("  Delete  %s\n", host)
 				if err := deleteRecord(token, zoneID, id); err != nil {
 					fmt.Fprintf(os.Stderr, "  ERROR   %s: %v\n", host, err)
 					errored++
@@ -302,7 +326,7 @@ func sync(token, zoneID, target string, desired map[string]bool, mode string) er
 		}
 	}
 
-	fmt.Printf("[sync] summary: ok=%d created=%d deleted=%d errors=%d\n", ok, created, deleted, errored)
+	fmt.Printf("[sync] Summary: ok=%d created=%d updated=%d deleted=%d errors=%d\n", ok, created, updated, deleted, errored)
 
 	if errored > 0 {
 		return fmt.Errorf("%d record(s) failed", errored)
@@ -355,7 +379,7 @@ func listRecords(token, zoneID, target string) (map[string]string, error) {
 	return records, nil
 }
 
-func createRecord(token, zoneID, hostname, target string) error {
+func upsertRecord(token, zoneID, hostname, target string) (string, string, error) {
 	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records", zoneID)
 
 	payload := createPayload{
@@ -369,9 +393,55 @@ func createRecord(token, zoneID, hostname, target string) error {
 
 	resp, err := cfRequest("POST", url, token, body)
 	if err != nil {
-		return err
+		if hasErrorCode(resp, errCodeRecordAlreadyExists) {
+			from, err := repointRecord(token, zoneID, hostname, target)
+			if err != nil {
+				return "", "", err
+			}
+			return "update", from, nil
+		}
+		return "", "", err
 	}
-	return checkStatus(resp)
+	if err := checkStatus(resp); err != nil {
+		return "", "", err
+	}
+	return "create", "", nil
+}
+
+func repointRecord(token, zoneID, hostname, target string) (string, error) {
+	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?type=CNAME&name=%s", zoneID, hostname)
+	resp, err := cfRequest("GET", url, token, nil)
+	if err != nil {
+		return "", fmt.Errorf("lookup conflict: %w", err)
+	}
+	var found struct {
+		Success bool        `json:"success"`
+		Result  []dnsRecord `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &found); err != nil {
+		return "", fmt.Errorf("parse lookup: %w", err)
+	}
+	if !found.Success || len(found.Result) == 0 {
+		return "", fmt.Errorf("conflict record not found for %s", hostname)
+	}
+
+	existing := found.Result[0]
+	updateURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", zoneID, existing.ID)
+	payload, _ := json.Marshal(createPayload{
+		Type:    "CNAME",
+		Name:    hostname,
+		Content: target,
+		Proxied: true,
+		TTL:     1,
+	})
+	upResp, err := cfRequest("PUT", updateURL, token, payload)
+	if err != nil {
+		return "", fmt.Errorf("repoint: %w", err)
+	}
+	if err := checkStatus(upResp); err != nil {
+		return "", fmt.Errorf("repoint: %w", err)
+	}
+	return existing.Content, nil
 }
 
 func deleteRecord(token, zoneID, recordID string) error {
@@ -422,7 +492,7 @@ func execCloudflared(configPath, tunnelID, credsPath string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("[entrypoint] launching cloudflared tunnel")
+	fmt.Println("[entrypoint] Launching cloudflared tunnel")
 	args := []string{"cloudflared", "tunnel", "--config", configPath}
 	if tunnelID != "" {
 		args = append(args, "--credentials-file", credsPath, "run", tunnelID)
@@ -430,7 +500,7 @@ func execCloudflared(configPath, tunnelID, credsPath string) {
 		args = append(args, "run")
 	}
 	if err := syscall.Exec(bin, args, os.Environ()); err != nil {
-		fmt.Fprintf(os.Stderr, "[entrypoint] exec failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[entrypoint] Exec failed: %v\n", err)
 		os.Exit(1)
 	}
 }
