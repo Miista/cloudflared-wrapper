@@ -1,20 +1,27 @@
 # cloudflared-wrapped
 
-A drop-in replacement for the official [cloudflared](https://github.com/cloudflare/cloudflared) Docker image that automatically manages Cloudflare DNS records from your tunnel's `config.yml`.
+A drop-in replacement for the official [cloudflared](https://github.com/cloudflare/cloudflared) Docker image that:
 
-With the official image, adding a new service means editing `config.yml` **and** manually creating a DNS record in the Cloudflare dashboard (or via CLI). This image removes that second step — on every container start it reads your ingress hostnames and ensures matching CNAME records exist via the Cloudflare API. Then it execs `cloudflared tunnel run` as normal.
+- Auto-creates (or adopts) the tunnel itself from a name — no manual `cloudflared tunnel create`, no `cert.pem` to mount.
+- Auto-manages Cloudflare DNS records from your tunnel's `config.yml`. CNAMEs are created if missing and repointed if they exist but target the wrong tunnel.
 
-Without DNS credentials set, it behaves identically to the official image.
+With the official image, standing up a new tunnel means running `cloudflared tunnel login`, `cloudflared tunnel create`, copying out a `credentials.json`, and then maintaining DNS records by hand. This image removes all of that — set an API token and a tunnel name and the rest is done on container start.
+
+Without any Cloudflare credentials set, it behaves identically to the official image.
 
 ## How it works
 
-1. On start, the wrapper parses `config.yml` and extracts every `hostname:` from the ingress rules
-2. It queries the Cloudflare API for existing CNAME records pointing at this tunnel
-3. Missing records are created, existing ones are left alone
-4. In `complete` mode, records pointing at this tunnel that are **not** in config are deleted
-5. The wrapper then replaces itself with `cloudflared` via exec — cloudflared becomes PID 1 and receives signals directly
+On start, with credentials configured, the wrapper:
 
-DNS sync failures are logged as warnings but never prevent the tunnel from starting.
+1. **Ensures the tunnel exists.** If `credentials.json` is on disk it's reused. Otherwise the wrapper looks the tunnel up by name via the Cloudflare API; an existing tunnel is adopted (its secret reconstructed from the `/token` endpoint), a missing one is created with a freshly generated secret. The resulting `credentials.json` is written to the data dir so subsequent restarts skip the API entirely.
+2. **Syncs DNS.** Parses `config.yml`, extracts every `hostname:` from ingress, and reconciles the corresponding CNAMEs in your zone:
+   - Missing → created.
+   - Already pointing at this tunnel → left alone.
+   - Pointing at something else → repointed (logged as `Update  host from X to Y`).
+   - In `complete` mode, CNAMEs pointing at this tunnel that are **not** in config are also deleted.
+3. **Execs cloudflared.** Replaces itself with `cloudflared tunnel run <uuid>` — cloudflared becomes PID 1 and receives signals directly. The tunnel UUID is passed on the CLI, so `config.yml` does not need a `tunnel:` field.
+
+Tunnel-ensure and DNS-sync failures are logged as warnings but never prevent the tunnel from starting (when the data dir already holds a valid `credentials.json`).
 
 ## Image
 
@@ -24,18 +31,25 @@ DNS sync failures are logged as warnings but never prevent the tunnel from start
 
 ## Quick start
 
-### 1. Create a tunnel
+### 1. Gather your IDs
 
-Create a tunnel in the [Zero Trust dashboard](https://one.dash.cloudflare.com/) or via CLI. You need:
-- A `credentials.json` (tunnel ID + secret)
-- The tunnel UUID
+From the Cloudflare dashboard you need:
 
-### 2. Write config.yml
+- **Account ID** — right sidebar of any zone, or Account Home.
+- **Zone ID** — right sidebar of the zone containing your ingress hostnames.
+
+### 2. Create an API token
+
+Go to [API Tokens](https://dash.cloudflare.com/profile/api-tokens) and create a token with:
+
+- **Zone → DNS → Edit** on the zone(s) your hostnames live in
+- **Account → Cloudflare Tunnel → Edit** on your account
+
+The Tunnel scope is only needed for the auto-create/adopt path. If you'd rather manage the tunnel yourself, omit it (see [Manual tunnel](#manual-tunnel) below).
+
+### 3. Write config.yml
 
 ```yaml
-tunnel: <your-tunnel-uuid>
-credentials-file: /etc/cloudflared/credentials.json
-
 ingress:
   - hostname: app.example.com
     service: http://host.docker.internal:8080
@@ -44,14 +58,7 @@ ingress:
   - service: http_status:404
 ```
 
-The catch-all `http_status:404` at the end is required by cloudflared.
-
-### 3. Create a Cloudflare API token
-
-Go to [API Tokens](https://dash.cloudflare.com/profile/api-tokens) and create a token with:
-- **Permissions**: Zone > DNS > Edit
-- **Zone resources**: the zone(s) your hostnames are in
-- **Expiry**: optional (can be set to never expire)
+No `tunnel:` or `credentials-file:` — the wrapper supplies both at runtime. The catch-all `http_status:404` at the end is required by cloudflared.
 
 ### 4. Run it
 
@@ -63,36 +70,53 @@ services:
     container_name: cloudflared
     restart: unless-stopped
     environment:
-      - CF_API_TOKEN=${CF_API_TOKEN}
+      - TUNNEL_NAME=my-tunnel
+      - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
       - CF_ZONE_ID=${CF_ZONE_ID}
+      - CF_API_TOKEN=${CF_API_TOKEN}
     volumes:
-      - ./cloudflared/data:/etc/cloudflared:ro
+      - ./cloudflared:/etc/cloudflared
     extra_hosts:
       - host.docker.internal:host-gateway
 ```
+
+Note the volume is **read-write** — the wrapper writes `credentials.json` here on the first start.
 
 ```bash
 docker compose up -d cloudflared
 ```
 
-On first start you'll see:
+On first start (tunnel doesn't exist yet):
 ```
-[sync] tunnel=abc123 mode=incremental hostnames=2
-  create  app.example.com
-  create  grafana.example.com
-[sync] summary: ok=0 created=2 deleted=0 errors=0
-[sync] dns sync ok in 340ms
-[entrypoint] launching cloudflared tunnel
+[tunnel] Creating new tunnel name=my-tunnel
+[tunnel] Created tunnel id=abc123...
+[sync] tunnel=abc123... mode=incremental hostnames=2
+  Create  app.example.com
+  Create  grafana.example.com
+[sync] Summary: ok=0 created=2 updated=0 deleted=0 errors=0
+[sync] DNS sync OK in 340ms
+[entrypoint] Launching cloudflared tunnel
 ```
 
-On subsequent starts, existing records are detected and skipped:
+On subsequent starts, `credentials.json` is reused and existing records are left alone:
 ```
-[sync] tunnel=abc123 mode=incremental hostnames=2
-  ok      app.example.com
-  ok      grafana.example.com
-[sync] summary: ok=2 created=0 deleted=0 errors=0
-[sync] dns sync ok in 120ms
-[entrypoint] launching cloudflared tunnel
+[tunnel] Using existing credentials.json tunnel=abc123...
+[sync] tunnel=abc123... mode=incremental hostnames=2
+  OK      app.example.com
+  OK      grafana.example.com
+[sync] Summary: ok=2 created=0 updated=0 deleted=0 errors=0
+[sync] DNS sync OK in 120ms
+[entrypoint] Launching cloudflared tunnel
+```
+
+If `credentials.json` is missing but a tunnel with that name already exists in Cloudflare (e.g. fresh volume, same account), the wrapper adopts it:
+```
+[tunnel] Adopting existing tunnel name=my-tunnel id=abc123...
+```
+
+If a CNAME for one of your hostnames exists but points at a different tunnel, it's repointed:
+```
+  Update  app.example.com from old-uuid.cfargotunnel.com to abc123.cfargotunnel.com
 ```
 
 ## Adding a new service
@@ -114,25 +138,43 @@ CF_SYNC_MODE=complete docker compose up -d --force-recreate cloudflared
 
 This deletes any CNAME pointing at your tunnel that isn't in config. Think of it as the difference between an incremental and a full deployment.
 
+## Manual tunnel
+
+If you'd rather create and own the tunnel yourself (e.g. you don't want to grant the `Cloudflare Tunnel:Edit` scope, or you manage tunnels via Terraform), omit `TUNNEL_NAME` and place a pre-existing `credentials.json` in the data dir. Add `tunnel:` and `credentials-file:` to your `config.yml`:
+
+```yaml
+tunnel: <your-tunnel-uuid>
+credentials-file: /etc/cloudflared/credentials.json
+ingress:
+  - hostname: app.example.com
+    service: http://host.docker.internal:8080
+  - service: http_status:404
+```
+
+DNS sync still works as long as `CF_API_TOKEN` and `CF_ZONE_ID` are set. The volume can be read-only in this mode.
+
 ## Environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `CF_API_TOKEN` | No | — | Cloudflare API token with Zone:DNS:Edit. If unset, DNS sync is skipped. |
+| `TUNNEL_NAME` | No | — | If set (with `CF_API_TOKEN` and `CF_ACCOUNT_ID`), the wrapper ensures a tunnel with this name exists and writes `credentials.json`. |
+| `CF_API_TOKEN` | No | — | Cloudflare API token. Needs Zone:DNS:Edit for DNS sync; add Account:Cloudflare Tunnel:Edit for auto tunnel ensure. |
+| `CF_ACCOUNT_ID` | No | — | Cloudflare account ID. Required when `TUNNEL_NAME` is set. |
 | `CF_ZONE_ID` | No | — | Cloudflare zone ID. If unset, DNS sync is skipped. |
 | `MODE` | No | `incremental` | `incremental` or `complete` |
 | `CONFIG_PATH` | No | `/etc/cloudflared/config.yml` | Path to the tunnel config file |
+| `CREDENTIALS_DIR` | No | `/etc/cloudflared` | Directory where `credentials.json` is read/written |
 
-Without `CF_API_TOKEN` and `CF_ZONE_ID`, the image behaves identically to the official cloudflared image.
+Without any Cloudflare credentials, the image behaves identically to the official cloudflared image.
 
 ## Mounts
 
 | Path | Description |
 |---|---|
-| `/etc/cloudflared/config.yml` | Tunnel config with `tunnel:` UUID and `ingress:` rules |
-| `/etc/cloudflared/credentials.json` | Tunnel credentials (generated during tunnel creation) |
+| `/etc/cloudflared/config.yml` | Tunnel config — `ingress:` rules. With manual tunnel, also `tunnel:` + `credentials-file:`. |
+| `/etc/cloudflared/credentials.json` | Tunnel credentials. Written by the wrapper in auto mode; supplied by you in manual mode. |
 
-Mount as read-only (`:ro`) — the container never writes to these files.
+In auto mode, mount the directory **read-write** so the wrapper can persist `credentials.json`. In manual mode you can mount it read-only.
 
 ## Automated builds
 
