@@ -74,21 +74,18 @@ services:
       - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
       - CF_ZONE_ID=${CF_ZONE_ID}
       - CF_API_TOKEN=${CF_API_TOKEN}
+      - CREDENTIALS_DIR=/var/lib/cloudflared
     volumes:
-      - ./cloudflared:/etc/cloudflared
+      - ./cloudflared:/etc/cloudflared:ro          # your config.yml, read-only
+      - cloudflared-creds:/var/lib/cloudflared      # wrapper-owned, no chown needed
     extra_hosts:
       - host.docker.internal:host-gateway
+
+volumes:
+  cloudflared-creds:
 ```
 
-Note the volume is **read-write** — the wrapper writes `credentials.json` here on the first start. The container runs as uid `65532` (the distroless `nonroot` user), so its gid (also `65532`) needs write access to your host directory. Easiest recipe that keeps the files editable by your normal user:
-
-```bash
-sudo chown -R $USER:65532 ./cloudflared
-sudo chmod -R 775 ./cloudflared
-sudo chmod g+s ./cloudflared   # new files inherit the group
-```
-
-Then start it:
+The config bind mount is **read-only** — you edit `config.yml` on the host as your normal user, no chown gymnastics. The `credentials.json` lives in a Docker-managed named volume that the container owns; the image pre-creates `/var/lib/cloudflared` with the right ownership so the volume inherits it on first start.
 
 ```bash
 docker compose up -d cloudflared
@@ -179,12 +176,32 @@ Without any Cloudflare credentials, the image behaves identically to the officia
 
 | Path | Description |
 |---|---|
-| `/etc/cloudflared/config.yml` | Tunnel config — `ingress:` rules. With manual tunnel, also `tunnel:` + `credentials-file:`. |
-| `/etc/cloudflared/credentials.json` | Tunnel credentials. Written by the wrapper in auto mode; supplied by you in manual mode. |
+| `/etc/cloudflared/config.yml` | Tunnel config — `ingress:` rules. With manual tunnel, also `tunnel:` + `credentials-file:`. Mount read-only. |
+| `/var/lib/cloudflared/credentials.json` | Tunnel credentials. In auto mode, written by the wrapper at this location (set `CREDENTIALS_DIR=/var/lib/cloudflared`). Pre-created in the image owned by uid `65532` so a named volume mounted here inherits the right perms. |
 
-In auto mode, mount the directory **read-write** so the wrapper can persist `credentials.json`, and ensure gid `65532` can write to it (see the quick start for the chown recipe). In manual mode you can mount it read-only.
+### Inspecting the credentials volume
 
-If chowning the bind mount is awkward, use a Docker named volume instead — Docker creates it with the container's uid by default, so no host-side chown is needed. Tradeoff: you can't edit `config.yml` from the host as easily.
+```bash
+docker run --rm -v cloudflared-creds:/c alpine cat /c/credentials.json
+```
+
+### Forcing a fresh adopt/create
+
+```bash
+docker compose down
+docker volume rm <project>_cloudflared-creds
+docker compose up -d
+```
+
+### Bind mount for credentials (alternative)
+
+If you'd rather keep `credentials.json` on the host filesystem, bind-mount the dir instead of using a named volume — but you'll need to make it writable by uid `65532`:
+
+```bash
+sudo chown -R $USER:65532 ./cloudflared-creds
+sudo chmod -R 775 ./cloudflared-creds
+sudo chmod g+s ./cloudflared-creds
+```
 
 ## Automated builds
 
