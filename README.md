@@ -80,7 +80,13 @@ services:
       - host.docker.internal:host-gateway
 ```
 
-Note the volume is **read-write** — the wrapper writes `credentials.json` here on the first start.
+Note the volume is **read-write** — the wrapper writes `credentials.json` here on the first start. The container runs as uid `65532` (the distroless `nonroot` user), so make sure that uid can write to your host directory:
+
+```bash
+sudo chown -R 65532:65532 ./cloudflared
+```
+
+Then start it:
 
 ```bash
 docker compose up -d cloudflared
@@ -174,7 +180,9 @@ Without any Cloudflare credentials, the image behaves identically to the officia
 | `/etc/cloudflared/config.yml` | Tunnel config — `ingress:` rules. With manual tunnel, also `tunnel:` + `credentials-file:`. |
 | `/etc/cloudflared/credentials.json` | Tunnel credentials. Written by the wrapper in auto mode; supplied by you in manual mode. |
 
-In auto mode, mount the directory **read-write** so the wrapper can persist `credentials.json`. In manual mode you can mount it read-only.
+In auto mode, mount the directory **read-write** so the wrapper can persist `credentials.json`, and ensure it's writable by uid `65532` (`sudo chown -R 65532:65532 <dir>`). In manual mode you can mount it read-only.
+
+If a bind-mount chown is awkward (e.g. the host dir is shared with other tooling), use a Docker named volume instead — Docker creates it with the container's uid by default, so no host-side chown is needed.
 
 ## Automated builds
 
