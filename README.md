@@ -38,6 +38,67 @@ On start, with credentials configured, the wrapper:
 
 Tunnel-ensure and DNS-sync failures are logged as warnings but never prevent the tunnel from starting (when the data dir already holds a valid `credentials.json`).
 
+## Activation model
+
+Every feature is opt-in, gated by its own input. An explicit command or
+`TUNNEL_TOKEN` short-circuits everything (true drop-in); otherwise the wrapper
+identifies the tunnel, then layers label discovery and DNS sync on top —
+independently of how the tunnel was identified.
+
+```mermaid
+flowchart TD
+    Start([container starts]) --> Q1{command/args passed?}
+    Q1 -->|yes| PT1["Passthrough: run the command<br/>(touch nothing)"]
+    Q1 -->|no| Q2{TUNNEL_TOKEN set?}
+
+    Q2 -->|yes| PT2["Passthrough: run --token<br/>remote-managed, touch nothing"]
+    Q2 -->|no| MM["Managed mode"]
+
+    PT1 --> CF([exec cloudflared])
+    PT2 --> CF
+
+    MM --> Q3{TUNNEL_NAME + CF creds?}
+    Q3 -->|yes| T_NAME["tunnelID = auto create/adopt by name<br/>(Feature 3)"]
+    Q3 -->|no| Q4{config.yml has tunnel:?}
+    Q4 -->|yes| T_CFG["tunnelID from config.yml"]
+    Q4 -->|no| ERR["no tunnel identity<br/>→ cloudflared errors"]
+
+    T_NAME --> S
+    T_CFG --> S
+
+    S{socket mounted?}
+    S -->|yes, readable| F1["+ Feature 1: build ingress from labels<br/>merge → /tmp/config.yml"]
+    S -->|absent| F1skip["ingress from config.yml only"]
+    S -->|present but unreadable| F1warn["WARN: skip discovery<br/>force incremental DNS"]
+
+    F1 --> D
+    F1skip --> D
+    F1warn --> D
+
+    D{CF_API_TOKEN + CF_ZONE_ID?}
+    D -->|yes| F2["+ Feature 2: sync DNS CNAMEs"]
+    D -->|no| F2skip["skip DNS"]
+
+    F2 --> CF
+    F2skip --> CF
+
+    CF --> Done([cloudflared tunnel run])
+
+    classDef pass fill:#e6ffe6,stroke:#2a2;
+    classDef feat fill:#e6f0ff,stroke:#26a;
+    classDef err fill:#ffe6e6,stroke:#a22;
+    class PT1,PT2 pass;
+    class T_NAME,F1,F2 feat;
+    class ERR err;
+```
+
+| Feature | Activates when | Needs |
+|---|---|---|
+| 0 — Passthrough | always the baseline | nothing |
+| 1 — Discover ingress from labels | Docker socket mounted | socket only |
+| 2 — Manage DNS | `CF_API_TOKEN` + `CF_ZONE_ID` set | Cloudflare API creds |
+| 3 — Auto-create/adopt tunnel | `TUNNEL_NAME` + token + account set | API creds + name |
+
 ## Image
 
 - Based on `gcr.io/distroless/static` — no shell, no package manager, same security posture as the official cloudflared image
