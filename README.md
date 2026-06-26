@@ -74,7 +74,6 @@ services:
       - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
       - CF_ZONE_ID=${CF_ZONE_ID}
       - CF_API_TOKEN=${CF_API_TOKEN}
-      - CREDENTIALS_DIR=/var/lib/cloudflared
     volumes:
       - ./cloudflared:/etc/cloudflared:ro          # your config.yml, read-only
       - cloudflared-creds:/var/lib/cloudflared      # wrapper-owned, no chown needed
@@ -141,7 +140,6 @@ services:
       - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
       - CF_ZONE_ID=${CF_ZONE_ID}
       - CF_API_TOKEN=${CF_API_TOKEN}
-      - CREDENTIALS_DIR=/var/lib/cloudflared
     volumes:
       - ./cloudflared:/etc/cloudflared:ro
       - cloudflared-creds:/var/lib/cloudflared
@@ -196,9 +194,9 @@ Label-discovered rules are merged with any manual ingress in `config.yml`:
 - Manual hostname rules come first, then discovered rules, then a single
   `http_status:404` catch-all (added automatically if absent).
 - On a hostname collision, the **manual** entry wins and the label is skipped.
-- The merged config is written to `$CREDENTIALS_DIR/config.yml` (a writable
-  location), leaving your read-only `config.yml` untouched. Set
-  `CREDENTIALS_DIR` to the writable named volume (e.g. `/var/lib/cloudflared`).
+- The merged config is written to `/tmp/config.yml` (regenerated on every
+  start), leaving your read-only `config.yml` untouched. Nothing extra to mount
+  or configure for this.
 
 > Like all label changes, the new ingress is picked up at startup. After adding
 > or changing a `cloudflare.io/*` label, `docker restart cloudflared`.
@@ -257,7 +255,7 @@ DNS sync still works as long as `CF_API_TOKEN` and `CF_ZONE_ID` are set. The vol
 | `CF_ZONE_ID` | No | — | Cloudflare zone ID. If unset, DNS sync is skipped. |
 | `MODE` | No | `incremental` | `incremental` or `complete` |
 | `CONFIG_PATH` | No | `/etc/cloudflared/config.yml` | Path to the tunnel config file |
-| `CREDENTIALS_DIR` | No | `/etc/cloudflared` | Directory where `credentials.json` is read/written |
+| `CREDENTIALS_DIR` | No | `/var/lib/cloudflared` | Directory where `credentials.json` is read/written. Defaults to the writable dir the image pre-creates (owned by uid `65532`), so it normally needs no override. |
 
 Without any Cloudflare credentials, the image behaves identically to the official cloudflared image.
 
@@ -266,7 +264,7 @@ Without any Cloudflare credentials, the image behaves identically to the officia
 | Path | Description |
 |---|---|
 | `/etc/cloudflared/config.yml` | Tunnel config — `ingress:` rules. With manual tunnel, also `tunnel:` + `credentials-file:`. Mount read-only. |
-| `/var/lib/cloudflared/credentials.json` | Tunnel credentials. In auto mode, written by the wrapper at this location (set `CREDENTIALS_DIR=/var/lib/cloudflared`). Pre-created in the image owned by uid `65532` so a named volume mounted here inherits the right perms. |
+| `/var/lib/cloudflared/credentials.json` | Tunnel credentials. In auto mode, written by the wrapper at this location (the default `CREDENTIALS_DIR`). Pre-created in the image owned by uid `65532` so a named volume mounted here inherits the right perms. |
 
 ### Inspecting the credentials volume
 

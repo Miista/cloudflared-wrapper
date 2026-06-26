@@ -80,7 +80,7 @@ type createPayload struct {
 
 func main() {
 	configPath := envOr("CONFIG_PATH", "/etc/cloudflared/config.yml")
-	credsDir := envOr("CREDENTIALS_DIR", "/etc/cloudflared")
+	credsDir := envOr("CREDENTIALS_DIR", "/var/lib/cloudflared")
 	credsPath := credsDir + "/credentials.json"
 	tunnelName := os.Getenv("TUNNEL_NAME")
 	apiToken := os.Getenv("CF_API_TOKEN")
@@ -113,7 +113,7 @@ func main() {
 			discovered = discoverIngress(containers)
 			discoverOK = true
 			if len(discovered) > 0 {
-				merged, err := writeMergedConfig(configPath, credsDir+"/config.yml", discovered)
+				merged, err := writeMergedConfig(configPath, "/tmp/config.yml", discovered)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[discover] WARN: merge failed, using base config: %v\n", err)
 				} else {
