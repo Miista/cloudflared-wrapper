@@ -124,9 +124,98 @@ If a CNAME for one of your hostnames exists but points at a different tunnel, it
   Update  app.example.com from old-uuid.cfargotunnel.com to abc123.cfargotunnel.com
 ```
 
+## Discovering ingress from container labels
+
+Instead of (or alongside) hand-writing ingress rules in `config.yml`, a service
+can declare its own public endpoint with a Docker label — the tunnel config
+then lives next to the service it exposes.
+
+Mount the Docker socket read-only and add one label to the service:
+
+```yaml
+services:
+  cloudflared:
+    image: ghcr.io/miista/cloudflared-wrapper:latest
+    environment:
+      - TUNNEL_NAME=my-tunnel
+      - CF_ACCOUNT_ID=${CF_ACCOUNT_ID}
+      - CF_ZONE_ID=${CF_ZONE_ID}
+      - CF_API_TOKEN=${CF_API_TOKEN}
+      - CREDENTIALS_DIR=/var/lib/cloudflared
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+      - cloudflared-creds:/var/lib/cloudflared
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # enables label discovery
+
+  app:
+    image: my-app:latest
+    labels:
+      cloudflare.io/hostname: "app.example.com"
+```
+
+On start the wrapper reads container labels over the socket, generates ingress
+rules, merges them into `config.yml`, and (if `CF_API_TOKEN` is set) creates the
+matching DNS records — exactly as for hand-written ingress.
+
+### Two independent features
+
+| Feature | Activates when | Needs |
+|---|---|---|
+| Discover ingress from labels | Docker socket is mounted | socket only |
+| Manage DNS | `CF_API_TOKEN` (+ zone/account) set | Cloudflare API creds |
+
+They compose: socket only → label-based routing with hand-managed DNS; token
+only → today's behavior; both → fully automatic; neither → identical to the
+official cloudflared image.
+
+### The service target is inferred
+
+The container declaring the label *is* the backend, so only the hostname is
+required. The wrapper builds the target as `http://<container-name>:<port>`:
+
+- **Port** — inferred from the container's single exposed port. If the container
+  exposes **zero or more than one** port, inference is ambiguous: specify the
+  port in the label as `cloudflare.io/hostname: "app.example.com:8080"`. The
+  `:8080` is the *backend* port, not the public one (public is always 443 via
+  the tunnel). A container that can't be resolved is skipped with a loud log —
+  it never aborts the tunnel.
+- **Scheme** — always `http://` (the tunnel terminates TLS at the edge). For an
+  `https`/`tcp`/`ssh` backend, write that rule by hand in `config.yml` instead.
+- **Disable** — comment out the label.
+
+### Supported labels
+
+| Label | Description | Default |
+|---|---|---|
+| `cloudflare.io/hostname` | Public hostname; presence enables ingress. Optional `:port` suffix sets the backend port. | — |
+
+### Merge rules
+
+Label-discovered rules are merged with any manual ingress in `config.yml`:
+
+- Manual hostname rules come first, then discovered rules, then a single
+  `http_status:404` catch-all (added automatically if absent).
+- On a hostname collision, the **manual** entry wins and the label is skipped.
+- The merged config is written to `$CREDENTIALS_DIR/config.yml` (a writable
+  location), leaving your read-only `config.yml` untouched. Set
+  `CREDENTIALS_DIR` to the writable named volume (e.g. `/var/lib/cloudflared`).
+
+> Like all label changes, the new ingress is picked up at startup. After adding
+> or changing a `cloudflare.io/*` label, `docker restart cloudflared`.
+
+### `complete` mode safety
+
+In `complete` mode, a CNAME for a hostname whose container has been stopped or
+removed is deleted (the hostname leaves the desired set). As a guardrail, if the
+socket is mounted but unreadable, the wrapper downgrades to `incremental` for
+that run rather than deleting records against an incomplete desired set. A socket
+that simply isn't mounted is treated as opting out of discovery, and `complete`
+runs normally against the manual `config.yml` entries.
+
 ## Adding a new service
 
-1. Add an ingress entry to `config.yml`
+1. Add an ingress entry to `config.yml` **or** a `cloudflare.io/hostname` label
+   to the service
 2. `docker compose restart cloudflared`
 
 That's it. The DNS record is created automatically.

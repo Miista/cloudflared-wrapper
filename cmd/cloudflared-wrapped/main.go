@@ -80,7 +80,8 @@ type createPayload struct {
 
 func main() {
 	configPath := envOr("CONFIG_PATH", "/etc/cloudflared/config.yml")
-	credsPath := envOr("CREDENTIALS_DIR", "/etc/cloudflared") + "/credentials.json"
+	credsDir := envOr("CREDENTIALS_DIR", "/etc/cloudflared")
+	credsPath := credsDir + "/credentials.json"
 	tunnelName := os.Getenv("TUNNEL_NAME")
 	apiToken := os.Getenv("CF_API_TOKEN")
 	accountID := os.Getenv("CF_ACCOUNT_ID")
@@ -97,15 +98,51 @@ func main() {
 		tunnelID = id
 	}
 
+	// Feature 1 — discover ingress from Docker labels. Activated purely by the
+	// socket being mounted; independent of any Cloudflare credentials. Three
+	// outcomes: socket absent (feature off), socket read OK, socket read failed.
+	effectiveConfigPath := configPath
+	var discovered []ingressRule
+	socketPresent := socketAvailable()
+	discoverOK := false
+	if socketPresent {
+		containers, err := getContainers()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[discover] WARN: socket present but unreadable: %v\n", err)
+		} else {
+			discovered = discoverIngress(containers)
+			discoverOK = true
+			if len(discovered) > 0 {
+				merged, err := writeMergedConfig(configPath, credsDir+"/config.yml", discovered)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[discover] WARN: merge failed, using base config: %v\n", err)
+				} else {
+					effectiveConfigPath = merged
+					fmt.Printf("[discover] merged %d label-discovered rule(s) into %s\n", len(discovered), merged)
+				}
+			}
+		}
+	}
+
 	if apiToken == "" || zoneID == "" {
 		fmt.Println("[sync] Skipped (CF_API_TOKEN/CF_ZONE_ID not set)")
-		execCloudflared(configPath, tunnelID, credsPath)
+		execCloudflared(effectiveConfigPath, tunnelID, credsPath)
 	}
 
 	cfg, err := parseConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sync] WARN: Failed to parse config: %v\n", err)
-		execCloudflared(configPath, tunnelID, credsPath)
+		execCloudflared(effectiveConfigPath, tunnelID, credsPath)
+	}
+
+	// Guardrail: in complete mode we delete CNAMEs not in the desired set. If
+	// the socket is mounted but we couldn't read it, the desired set is missing
+	// the label-discovered hosts — deleting against it could wipe live records.
+	// Fall back to incremental for this run. (Socket simply absent is fine —
+	// the user opted out of feature 1, so complete is trustworthy.)
+	if mode == "complete" && socketPresent && !discoverOK {
+		fmt.Fprintln(os.Stderr, "[sync] WARN: socket unreadable; downgrading complete->incremental to avoid deleting records")
+		mode = "incremental"
 	}
 
 	syncTunnelID := tunnelID
@@ -114,6 +151,9 @@ func main() {
 	}
 	target := syncTunnelID + ".cfargotunnel.com"
 	desired := desiredHostnames(cfg)
+	for _, r := range discovered {
+		desired[r.Hostname] = true
+	}
 
 	fmt.Printf("[sync] tunnel=%s mode=%s hostnames=%d\n", syncTunnelID, mode, len(desired))
 
@@ -124,7 +164,7 @@ func main() {
 		fmt.Printf("[sync] DNS sync OK in %s\n", time.Since(start).Round(time.Millisecond))
 	}
 
-	execCloudflared(configPath, tunnelID, credsPath)
+	execCloudflared(effectiveConfigPath, tunnelID, credsPath)
 }
 
 type credentials struct {
