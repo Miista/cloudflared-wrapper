@@ -4,10 +4,25 @@ A drop-in replacement for the official [cloudflared](https://github.com/cloudfla
 
 - Auto-creates (or adopts) the tunnel itself from a name — no manual `cloudflared tunnel create`, no `cert.pem` to mount.
 - Auto-manages Cloudflare DNS records from your tunnel's `config.yml`. CNAMEs are created if missing and repointed if they exist but target the wrong tunnel.
+- Discovers ingress from Docker container labels, so a service's public endpoint lives next to the service.
 
 With the official image, standing up a new tunnel means running `cloudflared tunnel login`, `cloudflared tunnel create`, copying out a `credentials.json`, and then maintaining DNS records by hand. This image removes all of that — set an API token and a tunnel name and the rest is done on container start.
 
-Without any Cloudflare credentials set, it behaves identically to the official image.
+## Drop-in compatibility
+
+Every extra feature is opt-in, gated by its own input. With none of them set the
+image is a **true drop-in** for the official one (it even runs as the same
+nonroot uid `65532`):
+
+- Pass a **command** (e.g. `command: tunnel run --token …`) → forwarded to
+  cloudflared untouched; the wrapper does nothing.
+- Set **`TUNNEL_TOKEN`** → runs the remote-managed tunnel as-is, untouched.
+- Mount a **`config.yml`** with `tunnel:` + `credentials-file:` → runs exactly
+  like the official image, with our features layered on only if you add them.
+
+An explicit command or `TUNNEL_TOKEN` always wins over the wrapper's own tunnel
+logic. So you can swap `cloudflare/cloudflared` for this image with **no other
+changes** and it just works; the automation only kicks in when you ask for it.
 
 ## How it works
 
@@ -141,9 +156,10 @@ services:
       - CF_ZONE_ID=${CF_ZONE_ID}
       - CF_API_TOKEN=${CF_API_TOKEN}
     volumes:
-      - ./cloudflared:/etc/cloudflared:ro
       - cloudflared-creds:/var/lib/cloudflared
       - /var/run/docker.sock:/var/run/docker.sock:ro   # enables label discovery
+    group_add:
+      - "999"   # ← the host's docker group GID; see note below
 
   app:
     image: my-app:latest
@@ -152,8 +168,16 @@ services:
 ```
 
 On start the wrapper reads container labels over the socket, generates ingress
-rules, merges them into `config.yml`, and (if `CF_API_TOKEN` is set) creates the
-matching DNS records — exactly as for hand-written ingress.
+rules, and (if `CF_API_TOKEN` is set) creates the matching DNS records — exactly
+as for hand-written ingress. With auto tunnel (`TUNNEL_NAME`) you don't even need
+a `config.yml`: ingress is synthesized from labels plus a catch-all.
+
+> **Socket permissions.** The image runs as nonroot (uid `65532`, same as the
+> official image), so it cannot read the root-owned Docker socket without being
+> added to the socket's group. Find the GID on the host with
+> `stat -c '%g' /var/run/docker.sock` and put it in `group_add`. This is the
+> only setup cost of label discovery, and it's paid only by containers that
+> mount the socket — base usage needs none of it.
 
 ### Two independent features
 
@@ -249,6 +273,7 @@ DNS sync still works as long as `CF_API_TOKEN` and `CF_ZONE_ID` are set. The vol
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `TUNNEL_TOKEN` | No | — | Remote-managed tunnel token. If set (or a command is passed to the container), the wrapper forwards straight to cloudflared and skips all of its own logic — a true drop-in. |
 | `TUNNEL_NAME` | No | — | If set (with `CF_API_TOKEN` and `CF_ACCOUNT_ID`), the wrapper ensures a tunnel with this name exists and writes `credentials.json`. |
 | `CF_API_TOKEN` | No | — | Cloudflare API token. Needs Zone:DNS:Edit for DNS sync; add Account:Cloudflare Tunnel:Edit for auto tunnel ensure. |
 | `CF_ACCOUNT_ID` | No | — | Cloudflare account ID. Required when `TUNNEL_NAME` is set. |

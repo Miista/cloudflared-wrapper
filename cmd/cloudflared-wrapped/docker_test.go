@@ -131,6 +131,25 @@ ingress:
 	}
 }
 
+func TestWriteMergedConfigMissingBase(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "does-not-exist.yml")
+	dst := filepath.Join(dir, "merged.yml")
+
+	out, err := writeMergedConfig(src, dst, []ingressRule{{Hostname: "x.example.com", Service: "http://x:80"}})
+	if err != nil {
+		t.Fatalf("expected synthesis from labels, got error: %v", err)
+	}
+	data, _ := os.ReadFile(out)
+	s := string(data)
+	if !strings.Contains(s, "x.example.com") || !strings.Contains(s, "http://x:80") {
+		t.Errorf("discovered rule missing from synthesized config:\n%s", s)
+	}
+	if !strings.Contains(s, "http_status:404") {
+		t.Errorf("catch-all missing from synthesized config:\n%s", s)
+	}
+}
+
 func TestWriteMergedConfigAddsCatchall(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "config.yml")

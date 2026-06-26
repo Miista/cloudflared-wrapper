@@ -163,11 +163,18 @@ func exposedPorts(c dockerContainer) []int {
 func writeMergedConfig(srcPath, dstPath string, discovered []ingressRule) (string, error) {
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", srcPath, err)
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("read %s: %w", srcPath, err)
+		}
+		// No base config — synthesize one purely from discovered rules.
+		data = nil
 	}
 	root := map[string]interface{}{}
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return "", fmt.Errorf("parse %s: %w", srcPath, err)
+	}
+	if root == nil {
+		root = map[string]interface{}{}
 	}
 
 	rawIngress, _ := root["ingress"].([]interface{})
