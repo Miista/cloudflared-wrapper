@@ -378,7 +378,27 @@ sudo chmod g+s ./cloudflared-creds
 
 ## Automated builds
 
-A GitHub Actions workflow checks for new cloudflared releases daily. When a new version is detected, the image is rebuilt and pushed with both a version tag and `latest`.
+A GitHub Actions workflow checks for new cloudflared releases daily. When a new version is detected — or the wrapper itself changes — the image is rebuilt and pushed.
+
+### Tags
+
+Every build on `main` pushes three tags:
+
+| Tag | Example | Mutable? | Use for |
+|-----|---------|----------|---------|
+| `<version>-g<sha>` | `2026.6.1-ga1b2c3d` | **No** — never reused | Pinning / reproducible deploys |
+| `<version>` | `2026.6.1` | Yes — moves to the newest build of that cloudflared version | Drop-in upstream-version tracking |
+| `latest` | `latest` | Yes | Always-newest |
+
+The `<version>` tag tracks the upstream cloudflared release and stays drop-in compatible, but it is **mutable**: if the wrapper is rebuilt (e.g. a Dockerfile change) while cloudflared stays on the same version, `2026.6.1` is moved to the new build. The old image then has no plain version tag pointing at it.
+
+For reproducible deployments, pin to the **immutable** `<version>-g<sha>` tag (which also tells you the exact wrapper commit) together with its digest:
+
+```yaml
+image: ghcr.io/miista/cloudflared-wrapper:2026.6.1-ga1b2c3d@sha256:...
+```
+
+The [`docker pin`](https://github.com/Miista/homebrew-docker-pin) plugin resolves `latest` to the most specific matching version tag automatically — which is the immutable `-g<sha>` tag — so `docker pin cloudflared` produces exactly this.
 
 ## License
 
