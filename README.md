@@ -310,7 +310,7 @@ In the default `incremental` mode, removing a hostname from `config.yml` does **
 To also clean up stale DNS records, use `complete` mode:
 
 ```bash
-CF_SYNC_MODE=complete docker compose up -d --force-recreate cloudflared
+MODE=complete docker compose up -d --force-recreate cloudflared
 ```
 
 This deletes any CNAME pointing at your tunnel that isn't in config. Think of it as the difference between an incremental and a full deployment.
