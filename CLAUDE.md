@@ -65,7 +65,7 @@ exists (don't block the tunnel from starting). The only hard exit is a failed `e
   `complete` is downgraded to `incremental` for that run to avoid deleting against an incomplete
   desired set.
 - DNS records are always created as proxied CNAMEs, TTL auto (`1`).
-- `go.mod` module path is `github.com/sorenguldmund/cloudflared-wrapped`; published image is
+- `go.mod` module path is `github.com/Miista/cloudflared-wrapper`; published image is
   `ghcr.io/miista/cloudflared-wrapper`.
 
 ## Release / tagging scheme

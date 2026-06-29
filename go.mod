@@ -1,4 +1,4 @@
-module github.com/sorenguldmund/cloudflared-wrapped
+module github.com/Miista/cloudflared-wrapper
 
 go 1.24
 
