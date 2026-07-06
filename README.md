@@ -29,11 +29,12 @@ changes** and it just works; the automation only kicks in when you ask for it.
 On start, with credentials configured, the wrapper:
 
 1. **Ensures the tunnel exists.** If `credentials.json` is on disk it's reused. Otherwise the wrapper looks the tunnel up by name via the Cloudflare API; an existing tunnel is adopted (its secret reconstructed from the `/token` endpoint), a missing one is created with a freshly generated secret. The resulting `credentials.json` is written to the data dir so subsequent restarts skip the API entirely.
-2. **Syncs DNS.** Parses `config.yml`, extracts every `hostname:` from ingress, and reconciles the corresponding CNAMEs in your zone:
+2. **Syncs DNS.** Parses `config.yml`, extracts every `hostname:` from ingress, and reconciles the corresponding CNAMEs across all configured zones:
    - Missing → created.
    - Already pointing at this tunnel → left alone.
    - Pointing at something else → repointed (logged as `Update  host from X to Y`).
    - In `complete` mode, CNAMEs pointing at this tunnel that are **not** in config are also deleted.
+   - Hostnames whose apex domain doesn't match any configured zone are explicitly logged as skipped.
 3. **Execs cloudflared.** Replaces itself with `cloudflared tunnel run <uuid>` — cloudflared becomes PID 1 and receives signals directly. The tunnel UUID is passed on the CLI, so `config.yml` does not need a `tunnel:` field.
 
 Tunnel-ensure and DNS-sync failures are logged as warnings but never prevent the tunnel from starting (when the data dir already holds a valid `credentials.json`).
@@ -112,7 +113,7 @@ flowchart TD
 From the Cloudflare dashboard you need:
 
 - **Account ID** — right sidebar of any zone, or Account Home.
-- **Zone ID** — right sidebar of the zone containing your ingress hostnames.
+- **Zone ID** — right sidebar of the zone(s) containing your ingress hostnames. If your hostnames span multiple zones, collect all of their IDs.
 
 ### 2. Create an API token
 
@@ -330,6 +331,23 @@ ingress:
 
 DNS sync still works as long as `CF_API_TOKEN` and `CF_ZONE_ID` are set. The volume can be read-only in this mode.
 
+## Multi-zone DNS sync
+
+If your hostnames span multiple Cloudflare zones, pass all their zone IDs as a comma-separated list:
+
+```yaml
+environment:
+  - CF_ZONE_ID=zone-id-for-example-com,zone-id-for-example-net
+```
+
+On sync, the wrapper resolves each zone ID's apex domain via the Cloudflare API (one call per unique zone, cached for the run), then routes each hostname to the matching zone. A hostname whose apex doesn't match any listed zone is skipped with an explicit log line:
+
+```
+[sync] SKIP    app.other-domain.com (apex not in CF_ZONE_ID list)
+```
+
+The API token must have **Zone → DNS → Edit** on every listed zone.
+
 ## Environment variables
 
 | Variable | Required | Default | Description |
@@ -338,7 +356,7 @@ DNS sync still works as long as `CF_API_TOKEN` and `CF_ZONE_ID` are set. The vol
 | `TUNNEL_NAME` | No | — | If set (with `CF_API_TOKEN` and `CF_ACCOUNT_ID`), the wrapper ensures a tunnel with this name exists and writes `credentials.json`. |
 | `CF_API_TOKEN` | No | — | Cloudflare API token. Needs Zone:DNS:Edit for DNS sync; add Account:Cloudflare Tunnel:Edit for auto tunnel ensure. |
 | `CF_ACCOUNT_ID` | No | — | Cloudflare account ID. Required when `TUNNEL_NAME` is set. |
-| `CF_ZONE_ID` | No | — | Cloudflare zone ID. If unset, DNS sync is skipped. |
+| `CF_ZONE_ID` | No | — | Cloudflare zone ID, or a comma-separated list of zone IDs for multi-zone setups. Each hostname's apex is matched against the listed zones; hostnames with no matching zone are skipped and logged. If unset, DNS sync is skipped entirely. |
 | `MODE` | No | `incremental` | `incremental` or `complete` |
 | `CONFIG_PATH` | No | `/etc/cloudflared/config.yml` | Path to the tunnel config file |
 | `CREDENTIALS_DIR` | No | `/var/lib/cloudflared` | Directory where `credentials.json` is read/written. Defaults to the writable dir the image pre-creates (owned by uid `65532`), so it normally needs no override. |

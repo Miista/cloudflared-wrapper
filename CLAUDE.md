@@ -42,8 +42,10 @@ these against production tunnels or zones.
      the `/token` endpoint) or creates a new one with a generated secret. Otherwise the tunnel id
      comes from `config.yml`'s `tunnel:` field.
   3. **Feature 1 — label discovery** (`docker.go`). Gated only by the Docker socket being mounted.
-  4. **Feature 2 — DNS sync.** Gated by `CF_API_TOKEN`+`CF_ZONE_ID`. Reconciles CNAMEs to
-     `<uuid>.cfargotunnel.com`.
+  4. **Feature 2 — DNS sync.** Gated by `CF_API_TOKEN`+`CF_ZONE_ID`. `CF_ZONE_ID` accepts a
+     single zone ID or a comma-separated list. Each hostname's apex is matched to a zone via
+     `GET /zones/<id>` (cached per run in `zoneNameCache`); unmatched hostnames are logged as
+     skipped. Reconciles CNAMEs to `<uuid>.cfargotunnel.com`.
   5. **Exec cloudflared** via `syscall.Exec` so cloudflared becomes PID 1 and gets signals
      directly. When the wrapper resolved the id, it passes `run <uuid>` on the CLI, so `config.yml`
      needs no `tunnel:` field.
