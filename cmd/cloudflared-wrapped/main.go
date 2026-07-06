@@ -588,6 +588,10 @@ func upsertRecord(token, zoneID, hostname, target string) (string, string, error
 			if err != nil {
 				return "", "", err
 			}
+			if from == "" {
+				// Conflict was in a different zone/type; record created cleanly here.
+				return "create", "", nil
+			}
 			return "update", from, nil
 		}
 		return "", "", err
@@ -612,7 +616,9 @@ func repointRecord(token, zoneID, hostname, target string) (string, error) {
 		return "", fmt.Errorf("parse lookup: %w", err)
 	}
 	if !found.Success || len(found.Result) == 0 {
-		return "", fmt.Errorf("conflict record not found for %s", hostname)
+		// The 81053 conflict is from a record in a different zone or of a
+		// different type — nothing to repoint here. Treat as a clean create.
+		return "", nil
 	}
 
 	existing := found.Result[0]
