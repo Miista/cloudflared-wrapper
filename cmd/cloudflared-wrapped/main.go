@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,6 +46,9 @@ type apiStatus struct {
 }
 
 const errCodeRecordAlreadyExists = 81053
+
+// cfBase is the Cloudflare API base URL. Overridden in tests to point at a fake server.
+var cfBase = "%s"
 
 func hasErrorCode(resp []byte, code int) bool {
 	var s apiStatus
@@ -146,7 +150,9 @@ func main() {
 		}
 	}
 
-	if apiToken == "" || zoneID == "" {
+	zoneIDs := parseZoneIDs(zoneID)
+
+	if apiToken == "" || len(zoneIDs) == 0 {
 		fmt.Println("[sync] Skipped (CF_API_TOKEN/CF_ZONE_ID not set)")
 		execCloudflared(effectiveConfigPath, tunnelID, credsPath)
 	}
@@ -182,13 +188,36 @@ func main() {
 		desired[r.Hostname] = true
 	}
 
-	fmt.Printf("[sync] tunnel=%s mode=%s hostnames=%d\n", syncTunnelID, mode, len(desired))
+	// Group hostnames by zone ID. Each hostname's apex is looked up in the
+	// zone list; hostnames with no matching zone are explicitly skipped.
+	byZone := make(map[string]map[string]bool)
+	for _, id := range zoneIDs {
+		byZone[id] = make(map[string]bool)
+	}
+	for host := range desired {
+		id, ok := matchZone(host, zoneIDs, apiToken)
+		if !ok {
+			fmt.Printf("[sync] SKIP    %s (apex not in CF_ZONE_ID list)\n", host)
+			continue
+		}
+		byZone[id][host] = true
+	}
+
+	fmt.Printf("[sync] tunnel=%s mode=%s hostnames=%d zones=%d\n", syncTunnelID, mode, len(desired), len(zoneIDs))
 
 	start := time.Now()
-	if err := sync(apiToken, zoneID, target, desired, mode); err != nil {
-		fmt.Fprintf(os.Stderr, "[sync] WARN: DNS sync failed in %s: %v\n", time.Since(start).Round(time.Millisecond), err)
-	} else {
+	var syncErr error
+	for _, id := range zoneIDs {
+		hosts := byZone[id]
+		if err := sync(apiToken, id, target, hosts, mode); err != nil {
+			fmt.Fprintf(os.Stderr, "[sync] WARN: DNS sync failed for zone %s: %v\n", id, err)
+			syncErr = err
+		}
+	}
+	if syncErr == nil {
 		fmt.Printf("[sync] DNS sync OK in %s\n", time.Since(start).Round(time.Millisecond))
+	} else {
+		fmt.Fprintf(os.Stderr, "[sync] WARN: DNS sync completed with errors in %s\n", time.Since(start).Round(time.Millisecond))
 	}
 
 	execCloudflared(effectiveConfigPath, tunnelID, credsPath)
@@ -246,7 +275,7 @@ func ensureTunnel(token, accountID, name, credsPath string) (string, error) {
 }
 
 func tunnelExists(token, accountID, tunnelID string) bool {
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel/%s", accountID, tunnelID)
+	url := fmt.Sprintf("%s/client/v4/accounts/%s/cfd_tunnel/%s", cfBase, accountID, tunnelID)
 	resp, err := cfRequest("GET", url, token, nil)
 	if err != nil {
 		return false
@@ -264,7 +293,7 @@ func tunnelExists(token, accountID, tunnelID string) bool {
 }
 
 func lookupTunnel(token, accountID, name string) (id, accountTag string, err error) {
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel?name=%s&is_deleted=false", accountID, name)
+	url := fmt.Sprintf("%s/client/v4/accounts/%s/cfd_tunnel?name=%s&is_deleted=false", cfBase, accountID, name)
 	resp, err := cfRequest("GET", url, token, nil)
 	if err != nil {
 		return "", "", err
@@ -292,7 +321,7 @@ func lookupTunnel(token, accountID, name string) (id, accountTag string, err err
 }
 
 func fetchTunnelSecret(token, accountID, tunnelID string) (string, error) {
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel/%s/token", accountID, tunnelID)
+	url := fmt.Sprintf("%s/client/v4/accounts/%s/cfd_tunnel/%s/token", cfBase, accountID, tunnelID)
 	resp, err := cfRequest("GET", url, token, nil)
 	if err != nil {
 		return "", err
@@ -339,7 +368,7 @@ func createTunnel(token, accountID, name string) (id, accountTag, secret string,
 		"config_src":    "local",
 	})
 
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/cfd_tunnel", accountID)
+	url := fmt.Sprintf("%s/client/v4/accounts/%s/cfd_tunnel", cfBase, accountID)
 	resp, err := cfRequest("POST", url, token, payload)
 	if err != nil {
 		return "", "", "", err
@@ -369,6 +398,76 @@ func writeCredentials(path string, c credentials) error {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
+}
+
+// parseZoneIDs splits CF_ZONE_ID on commas and trims whitespace.
+func parseZoneIDs(raw string) []string {
+	var ids []string
+	for _, s := range strings.Split(raw, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			ids = append(ids, s)
+		}
+	}
+	return ids
+}
+
+// apexDomain returns the last two labels of a hostname (e.g. "links.guldmund.net" → "guldmund.net").
+func apexDomain(hostname string) string {
+	parts := strings.Split(hostname, ".")
+	if len(parts) < 2 {
+		return hostname
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+// matchZone returns the zone ID from zoneIDs whose apex matches hostname's apex,
+// querying the Cloudflare API for each zone ID's name on demand (cached per call).
+// Returns ("", false) if no zone matches.
+func matchZone(hostname string, zoneIDs []string, token string) (string, bool) {
+	apex := apexDomain(hostname)
+	for _, id := range zoneIDs {
+		name, err := lookupZoneName(token, id)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sync] WARN: could not look up zone %s: %v\n", id, err)
+			continue
+		}
+		if name == apex {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+var zoneNameCache = map[string]string{}
+
+// lookupZoneName fetches the zone name for a given zone ID, with in-process caching.
+func lookupZoneName(token, zoneID string) (string, error) {
+	if name, ok := zoneNameCache[zoneID]; ok {
+		return name, nil
+	}
+	url := fmt.Sprintf("%s/client/v4/zones/%s", cfBase, zoneID)
+	resp, err := cfRequest("GET", url, token, nil)
+	if err != nil {
+		return "", err
+	}
+	var parsed struct {
+		Success bool `json:"success"`
+		Result  struct {
+			Name string `json:"name"`
+		} `json:"result"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(resp, &parsed); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+	if !parsed.Success {
+		return "", fmt.Errorf("api error: %v", parsed.Errors)
+	}
+	zoneNameCache[zoneID] = parsed.Result.Name
+	return parsed.Result.Name, nil
 }
 
 func sync(token, zoneID, target string, desired map[string]bool, mode string) error {
@@ -448,7 +547,7 @@ func desiredHostnames(cfg *config) map[string]bool {
 }
 
 func listRecords(token, zoneID, target string) (map[string]string, error) {
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?type=CNAME&content=%s&per_page=500", zoneID, target)
+	url := fmt.Sprintf("%s/client/v4/zones/%s/dns_records?type=CNAME&content=%s&per_page=500", cfBase, zoneID, target)
 
 	resp, err := cfRequest("GET", url, token, nil)
 	if err != nil {
@@ -471,7 +570,7 @@ func listRecords(token, zoneID, target string) (map[string]string, error) {
 }
 
 func upsertRecord(token, zoneID, hostname, target string) (string, string, error) {
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records", zoneID)
+	url := fmt.Sprintf("%s/client/v4/zones/%s/dns_records", cfBase, zoneID)
 
 	payload := createPayload{
 		Type:    "CNAME",
@@ -500,7 +599,7 @@ func upsertRecord(token, zoneID, hostname, target string) (string, string, error
 }
 
 func repointRecord(token, zoneID, hostname, target string) (string, error) {
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?type=CNAME&name=%s", zoneID, hostname)
+	url := fmt.Sprintf("%s/client/v4/zones/%s/dns_records?type=CNAME&name=%s", cfBase, zoneID, hostname)
 	resp, err := cfRequest("GET", url, token, nil)
 	if err != nil {
 		return "", fmt.Errorf("lookup conflict: %w", err)
@@ -517,7 +616,7 @@ func repointRecord(token, zoneID, hostname, target string) (string, error) {
 	}
 
 	existing := found.Result[0]
-	updateURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", zoneID, existing.ID)
+	updateURL := fmt.Sprintf("%s/client/v4/zones/%s/dns_records/%s", cfBase, zoneID, existing.ID)
 	payload, _ := json.Marshal(createPayload{
 		Type:    "CNAME",
 		Name:    hostname,
@@ -536,7 +635,7 @@ func repointRecord(token, zoneID, hostname, target string) (string, error) {
 }
 
 func deleteRecord(token, zoneID, recordID string) error {
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", zoneID, recordID)
+	url := fmt.Sprintf("%s/client/v4/zones/%s/dns_records/%s", cfBase, zoneID, recordID)
 
 	resp, err := cfRequest("DELETE", url, token, nil)
 	if err != nil {
