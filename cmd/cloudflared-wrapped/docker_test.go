@@ -54,6 +54,37 @@ func TestDiscoverIngress(t *testing.T) {
 	}
 }
 
+func hostNetwork(mode string) struct {
+	NetworkMode string `json:"NetworkMode"`
+} {
+	return struct {
+		NetworkMode string `json:"NetworkMode"`
+	}{mode}
+}
+
+func TestDiscoverIngressHostNetwork(t *testing.T) {
+	containers := []dockerContainer{
+		// host-network, single port -> host.docker.internal
+		{Names: []string{"/ha"}, Labels: map[string]string{labelHostname: "ha.example.com"}, Ports: tcpPorts(8123), HostConfig: hostNetwork("host")},
+		// host-network, explicit :port -> host.docker.internal
+		{Names: []string{"/svc"}, Labels: map[string]string{labelHostname: "svc.example.com:9000"}, Ports: tcpPorts(80, 443), HostConfig: hostNetwork("host")},
+		// host-network, multiple ports, no explicit port -> skipped
+		{Names: []string{"/multi"}, Labels: map[string]string{labelHostname: "multi.example.com"}, Ports: tcpPorts(80, 443), HostConfig: hostNetwork("host")},
+		// bridge network -> container name as before
+		{Names: []string{"/app"}, Labels: map[string]string{labelHostname: "app.example.com"}, Ports: tcpPorts(8080), HostConfig: hostNetwork("bridge")},
+	}
+
+	got := discoverIngress(containers)
+	want := []ingressRule{
+		{Hostname: "ha.example.com", Service: "http://host.docker.internal:8123"},
+		{Hostname: "svc.example.com", Service: "http://host.docker.internal:9000"},
+		{Hostname: "app.example.com", Service: "http://app:8080"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("discoverIngress host-network mismatch\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
 func TestWriteMergedConfig(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "config.yml")

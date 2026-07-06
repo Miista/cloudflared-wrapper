@@ -46,6 +46,9 @@ type dockerContainer struct {
 		PrivatePort int    `json:"PrivatePort"`
 		Type        string `json:"Type"`
 	} `json:"Ports"`
+	HostConfig struct {
+		NetworkMode string `json:"NetworkMode"`
+	} `json:"HostConfig"`
 }
 
 // getContainers lists running containers via GET /containers/json. The
@@ -106,6 +109,8 @@ func discoverIngress(containers []dockerContainer) []ingressRule {
 			port = p
 		}
 
+		isHostNetwork := c.HostConfig.NetworkMode == "host"
+
 		if port == 0 {
 			ports := exposedPorts(c)
 			switch len(ports) {
@@ -115,14 +120,23 @@ func discoverIngress(containers []dockerContainer) []ingressRule {
 				fmt.Fprintf(os.Stderr, "[discover] skip %s: no exposed ports; specify %s: %s:<port>\n", name, labelHostname, host)
 				continue
 			default:
-				fmt.Fprintf(os.Stderr, "[discover] skip %s: %d exposed ports %v; specify %s: %s:<port>\n", name, len(ports), ports, labelHostname, host)
+				if isHostNetwork {
+					fmt.Fprintf(os.Stderr, "[discover] skip %s: host-network container with %d exposed ports %v; specify %s: %s:<port>\n", name, len(ports), ports, labelHostname, host)
+				} else {
+					fmt.Fprintf(os.Stderr, "[discover] skip %s: %d exposed ports %v; specify %s: %s:<port>\n", name, len(ports), ports, labelHostname, host)
+				}
 				continue
 			}
 		}
 
+		backend := name
+		if isHostNetwork {
+			backend = "host.docker.internal"
+		}
+
 		rule := ingressRule{
 			Hostname: host,
-			Service:  fmt.Sprintf("http://%s:%d", name, port),
+			Service:  fmt.Sprintf("http://%s:%d", backend, port),
 		}
 		fmt.Printf("[discover] %s -> %s\n", rule.Hostname, rule.Service)
 		rules = append(rules, rule)
