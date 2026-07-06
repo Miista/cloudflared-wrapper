@@ -48,7 +48,7 @@ type apiStatus struct {
 const errCodeRecordAlreadyExists = 81053
 
 // cfBase is the Cloudflare API base URL. Overridden in tests to point at a fake server.
-var cfBase = "%s"
+var cfBase = "https://api.cloudflare.com"
 
 func hasErrorCode(resp []byte, code int) bool {
 	var s apiStatus
