@@ -188,20 +188,7 @@ func main() {
 		desired[r.Hostname] = true
 	}
 
-	// Group hostnames by zone ID. Each hostname's apex is looked up in the
-	// zone list; hostnames with no matching zone are explicitly skipped.
-	byZone := make(map[string]map[string]bool)
-	for _, id := range zoneIDs {
-		byZone[id] = make(map[string]bool)
-	}
-	for host := range desired {
-		id, ok := matchZone(host, zoneIDs, apiToken)
-		if !ok {
-			fmt.Printf("[sync] SKIP    %s (apex not in CF_ZONE_ID list)\n", host)
-			continue
-		}
-		byZone[id][host] = true
-	}
+	byZone := groupByZone(desired, zoneIDs, apiToken)
 
 	fmt.Printf("[sync] tunnel=%s mode=%s hostnames=%d zones=%d\n", syncTunnelID, mode, len(desired), len(zoneIDs))
 
@@ -401,6 +388,26 @@ func writeCredentials(path string, c credentials) error {
 }
 
 // parseZoneIDs splits CF_ZONE_ID on commas and trims whitespace.
+// groupByZone distributes hostnames across zone IDs by apex match.
+// Hostnames with no matching zone are logged as skipped and excluded from the result.
+// A hostname that ends up in the wrong zone (e.g. because CF_ZONE_ID was misconfigured)
+// will be absent from all byZone sets and never passed to sync().
+func groupByZone(desired map[string]bool, zoneIDs []string, token string) map[string]map[string]bool {
+	byZone := make(map[string]map[string]bool)
+	for _, id := range zoneIDs {
+		byZone[id] = make(map[string]bool)
+	}
+	for host := range desired {
+		id, ok := matchZone(host, zoneIDs, token)
+		if !ok {
+			fmt.Printf("[sync] SKIP    %s (apex not in CF_ZONE_ID list)\n", host)
+			continue
+		}
+		byZone[id][host] = true
+	}
+	return byZone
+}
+
 func parseZoneIDs(raw string) []string {
 	var ids []string
 	for _, s := range strings.Split(raw, ",") {

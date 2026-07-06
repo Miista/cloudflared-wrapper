@@ -187,6 +187,111 @@ func TestMatchZone(t *testing.T) {
 	})
 }
 
+// --- groupByZone ---
+//
+// This is the regression test for the "wrong zone" bug: a hostname whose apex
+// does not match any configured zone must never appear in byZone and must
+// therefore never be passed to sync(). Before the fix, main() called sync()
+// with a single hardcoded zoneID regardless of whether the hostname's apex
+// matched that zone, which caused records to be created under the wrong zone
+// (e.g. "links.wrongzone.example" created as a subdomain of "right.example").
+
+func TestGroupByZone_skipsUnmatchedHostname(t *testing.T) {
+	srv := zoneServer(t, map[string]string{
+		"zone-right": "right.example",
+	})
+	defer srv.Close()
+
+	zoneNameCache = map[string]string{}
+	zones := []string{"zone-right"}
+
+	withCFBase(srv, func() {
+		desired := map[string]bool{
+			"app.right.example":  true,
+			"app.wrong.example":  true, // different apex — must be skipped
+			"app2.wrong.example": true, // another non-matching hostname
+		}
+		byZone := groupByZone(desired, zones, "tok")
+
+		// only zone-right should have entries
+		got := byZone["zone-right"]
+		if !got["app.right.example"] {
+			t.Error("expected app.right.example to be routed to zone-right")
+		}
+		if got["app.wrong.example"] {
+			t.Error("app.wrong.example must NOT be routed to zone-right (wrong apex)")
+		}
+		if got["app2.wrong.example"] {
+			t.Error("app2.wrong.example must NOT be routed to zone-right (wrong apex)")
+		}
+	})
+}
+
+func TestGroupByZone_multiZone(t *testing.T) {
+	srv := zoneServer(t, map[string]string{
+		"zone-a": "alpha.example",
+		"zone-b": "beta.example",
+	})
+	defer srv.Close()
+
+	zoneNameCache = map[string]string{}
+	zones := []string{"zone-a", "zone-b"}
+
+	withCFBase(srv, func() {
+		desired := map[string]bool{
+			"app.alpha.example":   true,
+			"admin.alpha.example": true,
+			"app.beta.example":    true,
+			"other.gamma.example": true, // no zone — must be skipped
+		}
+		byZone := groupByZone(desired, zones, "tok")
+
+		if !byZone["zone-a"]["app.alpha.example"] || !byZone["zone-a"]["admin.alpha.example"] {
+			t.Error("alpha hostnames not routed to zone-a")
+		}
+		if !byZone["zone-b"]["app.beta.example"] {
+			t.Error("beta hostname not routed to zone-b")
+		}
+		// cross-zone contamination check
+		if byZone["zone-a"]["app.beta.example"] {
+			t.Error("beta hostname must NOT appear in zone-a")
+		}
+		if byZone["zone-b"]["app.alpha.example"] {
+			t.Error("alpha hostname must NOT appear in zone-b")
+		}
+		// skipped hostname must not appear anywhere
+		for id, hosts := range byZone {
+			if hosts["other.gamma.example"] {
+				t.Errorf("gamma hostname must be skipped, but found in zone %s", id)
+			}
+		}
+	})
+}
+
+func TestGroupByZone_allSkippedWhenNoZoneMatches(t *testing.T) {
+	srv := zoneServer(t, map[string]string{
+		"zone-a": "alpha.example",
+	})
+	defer srv.Close()
+
+	zoneNameCache = map[string]string{}
+	zones := []string{"zone-a"}
+
+	withCFBase(srv, func() {
+		desired := map[string]bool{
+			"app.beta.example":  true,
+			"app.gamma.example": true,
+		}
+		byZone := groupByZone(desired, zones, "tok")
+
+		for id, hosts := range byZone {
+			if len(hosts) > 0 {
+				t.Errorf("expected no hostnames routed to any zone, got %v in %s", hosts, id)
+			}
+		}
+	})
+}
+
 func TestMatchZoneSingleZone(t *testing.T) {
 	// backward compat: single zone ID behaves identically to before
 	srv := zoneServer(t, map[string]string{
