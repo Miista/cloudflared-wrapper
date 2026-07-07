@@ -54,24 +54,24 @@ func TestDiscoverIngress(t *testing.T) {
 	}
 }
 
-func TestDiscoverIngressBackendOverride(t *testing.T) {
+func TestDiscoverIngressReverseProxy(t *testing.T) {
 	containers := []dockerContainer{
 		// http override: bare host:port gets http:// scheme, port inference skipped
 		// (the container exposes 8080 but the override wins).
 		{Names: []string{"/gatus"}, Labels: map[string]string{
-			labelHostname: "status.example.com",
-			labelBackend:  "caddy:80",
+			labelHostname:     "status.example.com",
+			labelReverseProxy: "caddy:80",
 		}, Ports: tcpPorts(8080)},
 		// https override by container name -> originRequest carries SNI + Host so
 		// the proxy matches the site and serves the right cert.
 		{Names: []string{"/links"}, Labels: map[string]string{
-			labelHostname: "links.example.com",
-			labelBackend:  "https://caddy:443",
+			labelHostname:     "links.example.com",
+			labelReverseProxy: "https://caddy:443",
 		}, Ports: tcpPorts(9090)},
 		// override with no exposed ports is fine — inference is bypassed.
 		{Names: []string{"/ha"}, Labels: map[string]string{
-			labelHostname: "ha.example.com",
-			labelBackend:  "https://caddy:443",
+			labelHostname:     "ha.example.com",
+			labelReverseProxy: "https://caddy:443",
 		}},
 	}
 
@@ -84,7 +84,7 @@ func TestDiscoverIngressBackendOverride(t *testing.T) {
 			OriginRequest: map[string]interface{}{"originServerName": "ha.example.com", "httpHostHeader": "ha.example.com"}},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("backend override mismatch\n got: %+v\nwant: %+v", got, want)
+		t.Fatalf("reverseproxy override mismatch\n got: %+v\nwant: %+v", got, want)
 	}
 }
 

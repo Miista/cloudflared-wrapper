@@ -54,11 +54,12 @@ these against production tunnels or zones.
   `cloudflare.io/hostname` labels, infers `http://<container-name>:<port>` (port from the single
   exposed TCP port unless `:port` is given in the label), and writes a merged config to
   `/tmp/config.yml` — the read-only mounted `config.yml` is never modified. A
-  `cloudflared.io/backend` label overrides the inferred backend with an explicit origin (skipping
-  port inference); an `https://` override also emits a per-rule `originRequest` setting
-  `originServerName` + `httpHostHeader` to the public hostname, so routing through a name-addressed
-  HTTPS reverse proxy (e.g. `caddy:443`) matches the right site and cert. This is how public tunnel
-  traffic is funneled through the same proxy as LAN traffic (shared `forward_auth`/TLS).
+  `cloudflared.io/reverseproxy` label routes a hostname through a reverse proxy instead of the
+  container (skipping port inference; only applied when set); an `https://` target also emits a
+  per-rule `originRequest` setting `originServerName` + `httpHostHeader` to the public hostname, so
+  routing through a name-addressed HTTPS reverse proxy (e.g. `caddy:443`) matches the right site and
+  cert. This is how public tunnel traffic is funneled through the same proxy as LAN traffic (shared
+  `forward_auth`/TLS). Note: it does not fall back — only set it for a hostname the proxy serves.
 
 Tunnel-ensure and DNS-sync failures are warnings, not fatal, once a valid `credentials.json`
 exists (don't block the tunnel from starting). The only hard exit is a failed `ensureTunnel`.

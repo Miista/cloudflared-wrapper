@@ -264,26 +264,27 @@ required. The wrapper builds the target as `http://<container-name>:<port>`:
   the tunnel). A container that can't be resolved is skipped with a loud log —
   it never aborts the tunnel.
 - **Scheme** — always `http://` (the tunnel terminates TLS at the edge). For an
-  `https`/`tcp`/`ssh` backend, use `cloudflared.io/backend` (below) or write the
-  rule by hand in `config.yml`.
+  `https`/`tcp`/`ssh` backend, use `cloudflared.io/reverseproxy` (below) or write
+  the rule by hand in `config.yml`.
 - **Disable** — comment out the label.
 
-### Overriding the backend (`cloudflared.io/backend`)
+### Routing through a reverse proxy (`cloudflared.io/reverseproxy`)
 
 By default the labeled container **is** the backend, so the tunnel routes
 `hostname` straight to it — which means it bypasses any reverse proxy in front
-of it (and that proxy's TLS, auth, headers). Set `cloudflared.io/backend` to
-point the tunnel at an explicit origin instead:
+of it (and that proxy's TLS, auth, headers). Set `cloudflared.io/reverseproxy`
+to route the hostname through the proxy instead:
 
 ```yaml
 labels:
   cloudflare.io/hostname: "status.example.com"
-  cloudflared.io/backend: "https://caddy:443"   # route through the proxy, not the app
+  cloudflared.io/reverseproxy: "https://caddy:443"   # route through the proxy, not the app
 ```
 
-- The value is `host:port` (defaults to `http://`) or a full `scheme://host:port`.
-  Port inference is skipped entirely — the override is authoritative.
-- **HTTPS to a proxy by container name**: when the backend is `https://…`, the
+- **Only applied when set.** Absent, routing is unchanged (direct to container).
+  The value is `host:port` (defaults to `http://`) or a full `scheme://host:port`;
+  when set it is authoritative and port inference is skipped.
+- **HTTPS to a proxy by container name**: when the target is `https://…`, the
   wrapper adds an `originRequest` block that sets both `originServerName` (the
   TLS SNI/cert name cloudflared expects) and `httpHostHeader` (the `Host` sent
   upstream) to the **public hostname**. Without this, the proxy would see the
@@ -292,13 +293,16 @@ labels:
 - Primary use: front every public hostname with a single reverse proxy (e.g.
   Caddy) so tunnel traffic and LAN traffic share one enforcement point
   (`forward_auth`, headers, TLS) instead of the tunnel reaching apps directly.
+- **Caveat**: only set this for a hostname the proxy actually serves. Point it at
+  a proxy with no matching site and that public endpoint breaks (TLS failure /
+  404) — the override does not fall back to the container.
 
 ### Supported labels
 
 | Label | Description | Default |
 |---|---|---|
 | `cloudflare.io/hostname` | Public hostname; presence enables ingress. Optional `:port` suffix sets the backend port. | — |
-| `cloudflared.io/backend` | Override the backend origin (`host:port` or `scheme://host:port`). Skips port inference. `https://` targets get an `originRequest` (SNI + Host = public hostname). | inferred `http://<container>:<port>` |
+| `cloudflared.io/reverseproxy` | Route the hostname through a reverse proxy (`host:port` or `scheme://host:port`) instead of direct to the container. Skips port inference. `https://` targets get an `originRequest` (SNI + Host = public hostname). Only applied when set. | (unset — direct to container) |
 
 ### Merge rules
 
