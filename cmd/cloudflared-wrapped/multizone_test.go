@@ -157,7 +157,7 @@ func TestLookupZoneNameNotFound(t *testing.T) {
 
 func TestMatchZone(t *testing.T) {
 	srv := zoneServer(t, map[string]string{
-		"zone-palmund": "palmund.net",
+		"zone-palmund":  "palmund.net",
 		"zone-guldmund": "guldmund.net",
 	})
 	defer srv.Close()

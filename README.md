@@ -264,14 +264,41 @@ required. The wrapper builds the target as `http://<container-name>:<port>`:
   the tunnel). A container that can't be resolved is skipped with a loud log —
   it never aborts the tunnel.
 - **Scheme** — always `http://` (the tunnel terminates TLS at the edge). For an
-  `https`/`tcp`/`ssh` backend, write that rule by hand in `config.yml` instead.
+  `https`/`tcp`/`ssh` backend, use `cloudflared.io/backend` (below) or write the
+  rule by hand in `config.yml`.
 - **Disable** — comment out the label.
+
+### Overriding the backend (`cloudflared.io/backend`)
+
+By default the labeled container **is** the backend, so the tunnel routes
+`hostname` straight to it — which means it bypasses any reverse proxy in front
+of it (and that proxy's TLS, auth, headers). Set `cloudflared.io/backend` to
+point the tunnel at an explicit origin instead:
+
+```yaml
+labels:
+  cloudflare.io/hostname: "status.example.com"
+  cloudflared.io/backend: "https://caddy:443"   # route through the proxy, not the app
+```
+
+- The value is `host:port` (defaults to `http://`) or a full `scheme://host:port`.
+  Port inference is skipped entirely — the override is authoritative.
+- **HTTPS to a proxy by container name**: when the backend is `https://…`, the
+  wrapper adds an `originRequest` block that sets both `originServerName` (the
+  TLS SNI/cert name cloudflared expects) and `httpHostHeader` (the `Host` sent
+  upstream) to the **public hostname**. Without this, the proxy would see the
+  container name — it couldn't match the right site (`Host`) or serve the right
+  cert (SNI). Requires the proxy to hold a cert valid for the public hostname.
+- Primary use: front every public hostname with a single reverse proxy (e.g.
+  Caddy) so tunnel traffic and LAN traffic share one enforcement point
+  (`forward_auth`, headers, TLS) instead of the tunnel reaching apps directly.
 
 ### Supported labels
 
 | Label | Description | Default |
 |---|---|---|
 | `cloudflare.io/hostname` | Public hostname; presence enables ingress. Optional `:port` suffix sets the backend port. | — |
+| `cloudflared.io/backend` | Override the backend origin (`host:port` or `scheme://host:port`). Skips port inference. `https://` targets get an `originRequest` (SNI + Host = public hostname). | inferred `http://<container>:<port>` |
 
 ### Merge rules
 

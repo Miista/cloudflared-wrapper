@@ -54,6 +54,60 @@ func TestDiscoverIngress(t *testing.T) {
 	}
 }
 
+func TestDiscoverIngressBackendOverride(t *testing.T) {
+	containers := []dockerContainer{
+		// http override: bare host:port gets http:// scheme, port inference skipped
+		// (the container exposes 8080 but the override wins).
+		{Names: []string{"/gatus"}, Labels: map[string]string{
+			labelHostname: "status.example.com",
+			labelBackend:  "caddy:80",
+		}, Ports: tcpPorts(8080)},
+		// https override by container name -> originRequest carries SNI + Host so
+		// the proxy matches the site and serves the right cert.
+		{Names: []string{"/links"}, Labels: map[string]string{
+			labelHostname: "links.example.com",
+			labelBackend:  "https://caddy:443",
+		}, Ports: tcpPorts(9090)},
+		// override with no exposed ports is fine — inference is bypassed.
+		{Names: []string{"/ha"}, Labels: map[string]string{
+			labelHostname: "ha.example.com",
+			labelBackend:  "https://caddy:443",
+		}},
+	}
+
+	got := discoverIngress(containers)
+	want := []ingressRule{
+		{Hostname: "status.example.com", Service: "http://caddy:80"},
+		{Hostname: "links.example.com", Service: "https://caddy:443",
+			OriginRequest: map[string]interface{}{"originServerName": "links.example.com", "httpHostHeader": "links.example.com"}},
+		{Hostname: "ha.example.com", Service: "https://caddy:443",
+			OriginRequest: map[string]interface{}{"originServerName": "ha.example.com", "httpHostHeader": "ha.example.com"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backend override mismatch\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// The originRequest block must survive into the serialized cloudflared config.
+func TestWriteMergedConfigOriginRequest(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "config.yml")
+	rules := []ingressRule{
+		{Hostname: "status.example.com", Service: "https://caddy:443",
+			OriginRequest: map[string]interface{}{"originServerName": "status.example.com", "httpHostHeader": "status.example.com"}},
+	}
+	if _, err := writeMergedConfig(filepath.Join(dir, "missing.yml"), dst, rules); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := os.ReadFile(dst)
+	if !strings.Contains(string(out), "originServerName: status.example.com") {
+		t.Errorf("originServerName missing from config:\n%s", out)
+	}
+	if !strings.Contains(string(out), "httpHostHeader: status.example.com") {
+		t.Errorf("httpHostHeader missing from config:\n%s", out)
+	}
+}
+
 func hostNetwork(mode string) struct {
 	NetworkMode string `json:"NetworkMode"`
 } {

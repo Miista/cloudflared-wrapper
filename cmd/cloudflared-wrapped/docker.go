@@ -17,6 +17,14 @@ import (
 const (
 	dockerSocket  = "/var/run/docker.sock"
 	labelHostname = "cloudflare.io/hostname"
+	// labelBackend overrides the inferred backend for a hostname. Normally the
+	// tunnel routes cloudflare.io/hostname straight to the labeled container
+	// (http://<name>:<port>). Setting cloudflared.io/backend points the tunnel
+	// at an explicit origin instead — e.g. "caddy:443" so public traffic enters
+	// through the reverse proxy (and its forward_auth / TLS) rather than hitting
+	// the app container directly and bypassing it. Value is host:port (scheme
+	// defaults to http) or a full scheme://host:port URL.
+	labelBackend = "cloudflared.io/backend"
 )
 
 // socketAvailable reports whether the Docker socket is mounted into the
@@ -77,6 +85,12 @@ func getContainers() ([]dockerContainer, error) {
 type ingressRule struct {
 	Hostname string
 	Service  string
+	// OriginRequest is an optional per-rule cloudflared originRequest block. It
+	// is set when the backend is an HTTPS reverse proxy reached by container
+	// name (e.g. caddy:443): cloudflared must send SNI + Host = the public
+	// hostname so the proxy matches the right site and serves the right cert,
+	// not the container name. Nil for direct http:// container routing.
+	OriginRequest map[string]interface{}
 }
 
 // discoverIngress turns container labels into ingress rules. The only required
@@ -111,6 +125,32 @@ func discoverIngress(containers []dockerContainer) []ingressRule {
 
 		isHostNetwork := c.HostConfig.NetworkMode == "host"
 
+		// cloudflared.io/backend overrides the inferred container backend: route
+		// this hostname at an explicit origin (typically the reverse proxy) so
+		// public traffic enters through it rather than hitting the app container
+		// directly. Port inference is skipped entirely.
+		if override := strings.TrimSpace(c.Labels[labelBackend]); override != "" {
+			rule := ingressRule{
+				Hostname: host,
+				Service:  normalizeBackend(override),
+			}
+			// When the override targets an HTTPS proxy by container name, the
+			// tunnel must present the PUBLIC hostname as both the TLS SNI and the
+			// Host header — otherwise the proxy sees the container name and can
+			// neither match the right site (Host) nor serve the right cert (SNI).
+			// cloudflared forwards the edge Host by default, but SNI defaults to
+			// the origin's own name, so this is required for name-based HTTPS.
+			if strings.HasPrefix(rule.Service, "https://") {
+				rule.OriginRequest = map[string]interface{}{
+					"originServerName": host,
+					"httpHostHeader":   host,
+				}
+			}
+			fmt.Printf("[discover] %s -> %s (backend override)\n", rule.Hostname, rule.Service)
+			rules = append(rules, rule)
+			continue
+		}
+
 		if port == 0 {
 			ports := exposedPorts(c)
 			switch len(ports) {
@@ -142,6 +182,17 @@ func discoverIngress(containers []dockerContainer) []ingressRule {
 		rules = append(rules, rule)
 	}
 	return rules
+}
+
+// normalizeBackend turns a cloudflared.io/backend value into a cloudflared
+// service URL. A bare host:port (or host) gets an http:// scheme; a value that
+// already carries a scheme is used as-is. This lets "caddy:443" mean plain http
+// while "https://caddy:443" opts into TLS to the origin.
+func normalizeBackend(v string) string {
+	if strings.Contains(v, "://") {
+		return v
+	}
+	return "http://" + v
 }
 
 // containerName returns the container's primary name with the leading slash
@@ -213,10 +264,14 @@ func writeMergedConfig(srcPath, dstPath string, discovered []ingressRule) (strin
 			fmt.Fprintf(os.Stderr, "[discover] %s already defined in config.yml; manual entry wins, skipping label\n", r.Hostname)
 			continue
 		}
-		hostnamed = append(hostnamed, map[string]interface{}{
+		entry := map[string]interface{}{
 			"hostname": r.Hostname,
 			"service":  r.Service,
-		})
+		}
+		if len(r.OriginRequest) > 0 {
+			entry["originRequest"] = r.OriginRequest
+		}
+		hostnamed = append(hostnamed, entry)
 		seen[r.Hostname] = true
 	}
 
