@@ -264,21 +264,21 @@ required. The wrapper builds the target as `http://<container-name>:<port>`:
   the tunnel). A container that can't be resolved is skipped with a loud log —
   it never aborts the tunnel.
 - **Scheme** — always `http://` (the tunnel terminates TLS at the edge). For an
-  `https`/`tcp`/`ssh` backend, use `cloudflared.io/reverseproxy` (below) or write
+  `https`/`tcp`/`ssh` backend, use `cloudflare.io/reverseproxy` (below) or write
   the rule by hand in `config.yml`.
 - **Disable** — comment out the label.
 
-### Routing through a reverse proxy (`cloudflared.io/reverseproxy`)
+### Routing through a reverse proxy (`cloudflare.io/reverseproxy`)
 
 By default the labeled container **is** the backend, so the tunnel routes
 `hostname` straight to it — which means it bypasses any reverse proxy in front
-of it (and that proxy's TLS, auth, headers). Set `cloudflared.io/reverseproxy`
+of it (and that proxy's TLS, auth, headers). Set `cloudflare.io/reverseproxy`
 to route the hostname through the proxy instead:
 
 ```yaml
 labels:
   cloudflare.io/hostname: "status.example.com"
-  cloudflared.io/reverseproxy: "https://caddy:443"   # route through the proxy, not the app
+  cloudflare.io/reverseproxy: "https://caddy:443"   # route through the proxy, not the app
 ```
 
 - **Only applied when set.** Absent, routing is unchanged (direct to container).
@@ -302,7 +302,7 @@ labels:
 | Label | Description | Default |
 |---|---|---|
 | `cloudflare.io/hostname` | Public hostname; presence enables ingress. Optional `:port` suffix sets the backend port. | — |
-| `cloudflared.io/reverseproxy` | Route the hostname through a reverse proxy (`host:port` or `scheme://host:port`) instead of direct to the container. Skips port inference. `https://` targets get an `originRequest` (SNI + Host = public hostname). Only applied when set. | (unset — direct to container) |
+| `cloudflare.io/reverseproxy` | Route the hostname through a reverse proxy (`host:port` or `scheme://host:port`) instead of direct to the container. Skips port inference. `https://` targets get an `originRequest` (SNI + Host = public hostname). Only applied when set. | (unset — direct to container) |
 
 ### Merge rules
 

@@ -54,7 +54,7 @@ these against production tunnels or zones.
   `cloudflare.io/hostname` labels, infers `http://<container-name>:<port>` (port from the single
   exposed TCP port unless `:port` is given in the label), and writes a merged config to
   `/tmp/config.yml` — the read-only mounted `config.yml` is never modified. A
-  `cloudflared.io/reverseproxy` label routes a hostname through a reverse proxy instead of the
+  `cloudflare.io/reverseproxy` label routes a hostname through a reverse proxy instead of the
   container (skipping port inference; only applied when set); an `https://` target also emits a
   per-rule `originRequest` setting `originServerName` + `httpHostHeader` to the public hostname, so
   routing through a name-addressed HTTPS reverse proxy (e.g. `caddy:443`) matches the right site and

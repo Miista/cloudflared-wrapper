@@ -21,11 +21,11 @@ const (
 	// straight to the labeled container. Normally the tunnel routes
 	// cloudflare.io/hostname direct to the container (http://<name>:<port>),
 	// which bypasses any proxy in front of it (and its forward_auth / TLS).
-	// Setting cloudflared.io/reverseproxy points the tunnel at the proxy — e.g.
+	// Setting cloudflare.io/reverseproxy points the tunnel at the proxy — e.g.
 	// "https://caddy:443" — so public traffic enters through the same front door
 	// as LAN traffic. Only applied when set; absent means unchanged direct
 	// routing. Value is host:port (scheme defaults to http) or scheme://host:port.
-	labelReverseProxy = "cloudflared.io/reverseproxy"
+	labelReverseProxy = "cloudflare.io/reverseproxy"
 )
 
 // socketAvailable reports whether the Docker socket is mounted into the
@@ -126,7 +126,7 @@ func discoverIngress(containers []dockerContainer) []ingressRule {
 
 		isHostNetwork := c.HostConfig.NetworkMode == "host"
 
-		// cloudflared.io/reverseproxy routes this hostname through a reverse
+		// cloudflare.io/reverseproxy routes this hostname through a reverse
 		// proxy instead of the labeled container, so public traffic enters
 		// through it rather than hitting the app directly. Only applied when set;
 		// port inference is skipped entirely.
@@ -185,7 +185,7 @@ func discoverIngress(containers []dockerContainer) []ingressRule {
 	return rules
 }
 
-// normalizeBackend turns a cloudflared.io/reverseproxy value into a cloudflared
+// normalizeBackend turns a cloudflare.io/reverseproxy value into a cloudflared
 // service URL. A bare host:port (or host) gets an http:// scheme; a value that
 // already carries a scheme is used as-is. This lets "caddy:443" mean plain http
 // while "https://caddy:443" opts into TLS to the origin.
