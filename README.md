@@ -96,7 +96,7 @@ flowchart TD
 | Feature | Activates when | Needs |
 |---|---|---|
 | 0 — Passthrough | always the baseline | nothing |
-| 1 — Discover ingress from labels | Docker socket mounted | socket only |
+| 1 — Discover ingress from labels | Docker socket mounted, or `DOCKER_HOST` set | socket only |
 | 2 — Manage DNS | `CF_API_TOKEN` + `CF_ZONE_ID` set | Cloudflare API creds |
 | 3 — Auto-create/adopt tunnel | `TUNNEL_NAME` + token + account set | API creds + name |
 
@@ -220,6 +220,9 @@ services:
     volumes:
       - cloudflared-creds:/var/lib/cloudflared
       - /var/run/docker.sock:/var/run/docker.sock:ro   # enables label discovery
+    # ...or, instead of the mount, point at a read-only proxy:
+    #   environment:
+    #     - DOCKER_HOST=tcp://docker-socket-proxy:2375
     group_add:
       - "999"   # ← the host's docker group GID; see note below
 

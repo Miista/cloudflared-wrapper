@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	dockerSocket  = "/var/run/docker.sock"
-	labelHostname = "cloudflare.io/hostname"
+	defaultDockerSocket = "/var/run/docker.sock"
+	labelHostname       = "cloudflare.io/hostname"
 	// labelReverseProxy routes a hostname through a reverse proxy instead of
 	// straight to the labeled container. Normally the tunnel routes
 	// cloudflare.io/hostname direct to the container (http://<name>:<port>),
@@ -28,24 +28,47 @@ const (
 	labelReverseProxy = "cloudflare.io/reverseproxy"
 )
 
-// socketAvailable reports whether the Docker socket is mounted into the
-// container. Its presence is the opt-in for label-based ingress discovery —
-// no env var required.
-func socketAvailable() bool {
-	_, err := os.Stat(dockerSocket)
+// dockerAvailable reports whether label-based ingress discovery should run.
+// Mounting the socket is the zero-config opt-in; setting DOCKER_HOST is the
+// explicit one, for talking to a docker-socket-proxy over TCP where there is
+// no socket file to find.
+func dockerAvailable() bool {
+	if strings.TrimSpace(os.Getenv("DOCKER_HOST")) != "" {
+		return true
+	}
+	_, err := os.Stat(defaultDockerSocket)
 	return err == nil
 }
 
-// dockerHTTP is an http.Client that talks to the Docker Engine API over the
-// Unix socket. We hand-roll this instead of pulling in the Docker SDK to keep
-// the binary tiny and the distroless base intact.
-var dockerHTTP = &http.Client{
-	Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", dockerSocket)
+// dockerBaseURL and dockerHTTP talk to the Docker Engine API over whichever
+// transport DOCKER_HOST names, defaulting to the conventional Unix socket. We
+// hand-roll this instead of pulling in the Docker SDK to keep the binary tiny
+// and the distroless base intact.
+var dockerBaseURL, dockerHTTP = newDockerClient(os.Getenv("DOCKER_HOST"))
+
+// newDockerClient resolves a DOCKER_HOST value into a request base URL and a
+// client wired to the matching transport. Only unix:// and tcp:// are
+// supported; anything else falls back to the default socket, since an
+// unreachable client is reported by the caller as a read failure anyway.
+func newDockerClient(host string) (string, *http.Client) {
+	host = strings.TrimSpace(host)
+	if addr, ok := strings.CutPrefix(host, "tcp://"); ok {
+		return "http://" + addr, &http.Client{}
+	}
+	path := defaultDockerSocket
+	if p, ok := strings.CutPrefix(host, "unix://"); ok && p != "" {
+		path = p
+	} else if host != "" {
+		fmt.Fprintf(os.Stderr, "[discover] WARN: unsupported DOCKER_HOST %q, using %s\n", host, defaultDockerSocket)
+	}
+	return "http://unix", &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", path)
+			},
 		},
-	},
+	}
 }
 
 type dockerContainer struct {
@@ -64,7 +87,7 @@ type dockerContainer struct {
 // response already carries Labels and Ports, so a single call is enough — no
 // per-container inspect needed.
 func getContainers() ([]dockerContainer, error) {
-	resp, err := dockerHTTP.Get("http://unix/containers/json")
+	resp, err := dockerHTTP.Get(dockerBaseURL + "/containers/json")
 	if err != nil {
 		return nil, err
 	}

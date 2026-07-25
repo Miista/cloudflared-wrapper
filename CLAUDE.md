@@ -41,7 +41,8 @@ these against production tunnels or zones.
      reuses on-disk `credentials.json`, else adopts an existing tunnel by name (secret rebuilt from
      the `/token` endpoint) or creates a new one with a generated secret. Otherwise the tunnel id
      comes from `config.yml`'s `tunnel:` field.
-  3. **Feature 1 — label discovery** (`docker.go`). Gated only by the Docker socket being mounted.
+  3. **Feature 1 — label discovery** (`docker.go`). Gated by Docker API access: the socket being
+     mounted, or `DOCKER_HOST` being set (e.g. a docker-socket-proxy over TCP).
   4. **Feature 2 — DNS sync.** Gated by `CF_API_TOKEN`+`CF_ZONE_ID`. `CF_ZONE_ID` accepts a
      single zone ID or a comma-separated list. Each hostname's apex is matched to a zone via
      `GET /zones/<id>` (cached per run in `zoneNameCache`); unmatched hostnames are logged as
@@ -49,7 +50,8 @@ these against production tunnels or zones.
   5. **Exec cloudflared** via `syscall.Exec` so cloudflared becomes PID 1 and gets signals
      directly. When the wrapper resolved the id, it passes `run <uuid>` on the CLI, so `config.yml`
      needs no `tunnel:` field.
-- **`cmd/cloudflared-wrapped/docker.go`** — talks to the Docker Engine API over the Unix socket
+- **`cmd/cloudflared-wrapped/docker.go`** — talks to the Docker Engine API over the transport named
+  by `DOCKER_HOST` (`unix://` or `tcp://`), defaulting to the conventional Unix socket
   with a hand-rolled `http.Client` (no Docker SDK, keeps the binary tiny). Reads
   `cloudflare.io/hostname` labels, infers `http://<container-name>:<port>` (port from the single
   exposed TCP port unless `:port` is given in the label), and writes a merged config to

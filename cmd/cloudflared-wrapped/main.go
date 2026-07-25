@@ -115,16 +115,17 @@ func main() {
 		tunnelID = id
 	}
 
-	// Feature 1 — discover ingress from Docker labels. Activated purely by the
-	// socket being mounted; independent of any Cloudflare credentials. Three
-	// outcomes: socket absent (feature off), socket read OK, socket read failed.
+	// Feature 1 — discover ingress from Docker labels. Activated by the socket
+	// being mounted or DOCKER_HOST being set; independent of any Cloudflare
+	// credentials. Three outcomes: no docker api (feature off), read OK, read
+	// failed.
 	var discovered []ingressRule
-	socketPresent := socketAvailable()
+	socketPresent := dockerAvailable()
 	discoverOK := false
 	if socketPresent {
 		containers, err := getContainers()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[discover] WARN: socket present but unreadable: %v\n", err)
+			fmt.Fprintf(os.Stderr, "[discover] WARN: docker api available but unreadable: %v\n", err)
 		} else {
 			discovered = discoverIngress(containers)
 			discoverOK = true
