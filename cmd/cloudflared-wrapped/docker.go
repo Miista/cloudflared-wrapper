@@ -275,12 +275,26 @@ func writeMergedConfig(srcPath, dstPath string, discovered []ingressRule) (strin
 			catchall = append(catchall, item)
 			continue
 		}
-		if h, ok := m["hostname"].(string); ok && h != "" {
-			hostnamed = append(hostnamed, m)
-			seen[h] = true
-		} else {
+		h, ok := m["hostname"].(string)
+		if !ok || h == "" {
 			catchall = append(catchall, m)
+			continue
 		}
+		// A name-based HTTPS origin (by container name, e.g. https://caddy:443)
+		// needs the PUBLIC hostname as both SNI and Host header regardless of
+		// where the entry came from — a hand-written config.yml line has
+		// exactly the same problem as a label-discovered one, and used to be
+		// silently exempt from this fix simply for being written by hand.
+		if svc, ok := m["service"].(string); ok && strings.HasPrefix(svc, "https://") {
+			if _, has := m["originRequest"]; !has {
+				m["originRequest"] = map[string]interface{}{
+					"originServerName": h,
+					"httpHostHeader":   h,
+				}
+			}
+		}
+		hostnamed = append(hostnamed, m)
+		seen[h] = true
 	}
 
 	for _, r := range discovered {

@@ -108,6 +108,83 @@ func TestWriteMergedConfigOriginRequest(t *testing.T) {
 	}
 }
 
+// A hand-written (or, going forward, hemma-generated) entry ALREADY in
+// config.yml has exactly the same name-based-HTTPS-origin problem as a
+// label-discovered one — Cloudflare's tunnel reaches the origin by container
+// name, so SNI/Host default to that name, not the public hostname Caddy
+// needs to pick the right site block and cert. This used to be silently
+// exempt from the fix purely for being a base-file entry rather than a
+// label-discovered one.
+func TestWriteMergedConfigOriginRequest_RawBaseEntry(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.yml")
+	dst := filepath.Join(dir, "merged.yml")
+	if err := os.WriteFile(src, []byte(`ingress:
+  - hostname: auth.example.com
+    service: https://caddy:443
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeMergedConfig(src, dst, nil); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := os.ReadFile(dst)
+	if !strings.Contains(string(out), "originServerName: auth.example.com") {
+		t.Errorf("originServerName should be injected for a raw https:// base entry:\n%s", out)
+	}
+	if !strings.Contains(string(out), "httpHostHeader: auth.example.com") {
+		t.Errorf("httpHostHeader should be injected for a raw https:// base entry:\n%s", out)
+	}
+}
+
+// An http:// (non-proxy) base entry must NOT get an originRequest block —
+// the fix only applies to name-based HTTPS origins.
+func TestWriteMergedConfigOriginRequest_RawHTTPEntryUntouched(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.yml")
+	dst := filepath.Join(dir, "merged.yml")
+	if err := os.WriteFile(src, []byte(`ingress:
+  - hostname: links.example.com
+    service: http://linkding:9090
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeMergedConfig(src, dst, nil); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := os.ReadFile(dst)
+	if strings.Contains(string(out), "originRequest") {
+		t.Errorf("http:// entry should not get an originRequest block:\n%s", out)
+	}
+}
+
+// A raw base entry that ALREADY has its own originRequest must not have it
+// clobbered — hand-written (or previously-generated) intent wins.
+func TestWriteMergedConfigOriginRequest_RawEntryAlreadySetIsPreserved(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.yml")
+	dst := filepath.Join(dir, "merged.yml")
+	if err := os.WriteFile(src, []byte(`ingress:
+  - hostname: auth.example.com
+    service: https://caddy:443
+    originRequest:
+      originServerName: custom.example.com
+      httpHostHeader: custom.example.com
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeMergedConfig(src, dst, nil); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := os.ReadFile(dst)
+	if !strings.Contains(string(out), "custom.example.com") {
+		t.Errorf("existing originRequest should be preserved, not overwritten:\n%s", out)
+	}
+	if strings.Contains(string(out), "originServerName: auth.example.com") {
+		t.Errorf("should not have overwritten the existing originServerName:\n%s", out)
+	}
+}
+
 func hostNetwork(mode string) struct {
 	NetworkMode string `json:"NetworkMode"`
 } {
