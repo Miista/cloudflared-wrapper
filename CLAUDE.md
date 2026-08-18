@@ -57,11 +57,24 @@ these against production tunnels or zones.
   exposed TCP port unless `:port` is given in the label), and writes a merged config to
   `/tmp/config.yml` — the read-only mounted `config.yml` is never modified. A
   `cloudflare.io/reverseproxy` label routes a hostname through a reverse proxy instead of the
-  container (skipping port inference; only applied when set); an `https://` target also emits a
-  per-rule `originRequest` setting `originServerName` + `httpHostHeader` to the public hostname, so
-  routing through a name-addressed HTTPS reverse proxy (e.g. `caddy:443`) matches the right site and
-  cert. This is how public tunnel traffic is funneled through the same proxy as LAN traffic (shared
-  `forward_auth`/TLS). Note: it does not fall back — only set it for a hostname the proxy serves.
+  container (skipping port inference; only applied when set). Note: it does not fall back — only
+  set it for a hostname the proxy serves.
+
+  **`originRequest` injection applies to EVERY `https://` ingress entry, not just labelled ones.**
+  Any entry whose service is a name-addressed HTTPS origin (e.g. `https://caddy:443`) gets a
+  per-rule `originRequest` setting `originServerName` + `httpHostHeader` to that entry's public
+  hostname — whether it came from a label, a hand-written `config.yml`, or a generator. Without it
+  the SNI is the *container name*, which the proxy has no certificate for, and cloudflared fails
+  every request with `remote error: tls: internal error`. This is how public tunnel traffic is
+  funneled through the same proxy as LAN traffic (shared `forward_auth`/TLS).
+
+  Consequently config generation runs whenever there is a base `config.yml` or a tunnel id —
+  `shouldGenerateConfig`, deliberately **independent of label discovery**. It was once gated on
+  having at least one discovered label, which tied this fix to an unrelated feature: a `config.yml`
+  of purely `https://` origins worked only while some other container happened to carry a
+  `cloudflare.io` label, and broke the moment the last one was removed. `writeMergedConfig`'s own
+  tests never caught it, because the bug was in whether it got *called* —
+  `TestShouldGenerateConfig` covers that gate directly now.
 
 Tunnel-ensure and DNS-sync failures are warnings, not fatal, once a valid `credentials.json`
 exists (don't block the tunnel from starting). The only hard exit is a failed `ensureTunnel`.

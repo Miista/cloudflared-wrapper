@@ -330,3 +330,63 @@ func TestWriteMergedConfigAddsCatchall(t *testing.T) {
 		t.Errorf("catch-all not appended when missing:\n%s", data)
 	}
 }
+
+// The origin-request fix must not depend on label discovery. This gate is the
+// thing that regressed once: it required len(discovered) > 0, so a config.yml
+// of purely https:// origins got its SNI injected only while some unrelated
+// container happened to carry a cloudflare.io label — and every tunnel
+// hostname started returning `tls: internal error` when the last one was
+// removed. writeMergedConfig's own tests passed throughout, because the bug
+// was in whether it got CALLED.
+func TestShouldGenerateConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		baseExists bool
+		tunnelID   string
+		want       bool
+	}{
+		{"base config, no tunnel id", true, "", true},
+		{"base config and tunnel id", true, "abc123", true},
+		{"no base, tunnel id (synthesize)", false, "abc123", true},
+		{"nothing to work from", false, "", false},
+	} {
+		if got := shouldGenerateConfig(tc.baseExists, tc.tunnelID); got != tc.want {
+			t.Errorf("%s: shouldGenerateConfig(%v, %q) = %v, want %v",
+				tc.name, tc.baseExists, tc.tunnelID, got, tc.want)
+		}
+	}
+}
+
+// End-to-end on the pairing that broke: a base config of only https:// origins
+// and NO discovered rules must still come out with originServerName set.
+func TestWriteMergedConfig_NoLabelsStillInjectsSNI(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "config.yml")
+	dst := filepath.Join(dir, "merged.yml")
+	if err := os.WriteFile(src, []byte(`ingress:
+  - hostname: docs.example.com
+    service: https://caddy:443
+  - hostname: mealie.example.com
+    service: https://caddy:443
+  - service: http_status:404
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !shouldGenerateConfig(true, "") {
+		t.Fatal("a base config alone must be enough to trigger generation")
+	}
+	if _, err := writeMergedConfig(src, dst, nil); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := os.ReadFile(dst)
+	for _, want := range []string{
+		"originServerName: docs.example.com",
+		"httpHostHeader: docs.example.com",
+		"originServerName: mealie.example.com",
+		"httpHostHeader: mealie.example.com",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("missing %q in merged config:\n%s", want, out)
+		}
+	}
+}

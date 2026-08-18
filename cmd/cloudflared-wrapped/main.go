@@ -82,6 +82,20 @@ type createPayload struct {
 	TTL     int    `json:"ttl"`
 }
 
+// shouldGenerateConfig decides whether to run writeMergedConfig. It is a
+// separate function only so the decision is testable: this gate, not the merge
+// itself, is where the origin-request fix was once lost (it used to require at
+// least one label-discovered rule), and the merge function's own tests could
+// not see that.
+//
+// True whenever there is anything to generate from — a base config to rewrite,
+// or a tunnel id to synthesize a minimal config with. Deliberately independent
+// of label discovery: the SNI/Host injection every name-based https:// origin
+// needs has nothing to do with where the ingress entry came from.
+func shouldGenerateConfig(baseExists bool, tunnelID string) bool {
+	return baseExists || tunnelID != ""
+}
+
 func main() {
 	// Feature 0 — drop-in passthrough. If the user already gave cloudflared what
 	// it needs directly, forward it untouched and skip all wrapper logic. This
@@ -132,21 +146,38 @@ func main() {
 		}
 	}
 
-	// Build the config cloudflared runs. Generate a merged config when we have
-	// label rules to add, or when the base config.yml is missing but we know the
-	// tunnel id (auto mode) and must synthesize at least a catch-all so
-	// cloudflared can start. Otherwise run the user's config.yml untouched.
+	// Build the config cloudflared runs. Always generate it when there is
+	// anything to generate FROM: writeMergedConfig does two jobs, and only one
+	// of them is about labels. The other — injecting originServerName/
+	// httpHostHeader for every name-based https:// origin — is needed by
+	// hand-written and generated config.yml entries just as much as by
+	// label-discovered ones (see writeMergedConfig's comment), because SNI to
+	// `https://caddy:443` is otherwise the container name, for which the origin
+	// has no certificate: cloudflared then reports `tls: internal error` and
+	// every tunnel hostname 502s.
+	//
+	// This used to be gated on `len(discovered) > 0`, which silently tied that
+	// fix to a feature it has nothing to do with — so a config.yml of purely
+	// https:// origins worked only for as long as some unrelated container
+	// happened to carry a cloudflare.io label, and broke the moment the last
+	// one went away. writeMergedConfig is a no-op-shaped rewrite when there is
+	// nothing to add, so running it unconditionally costs one file write.
 	effectiveConfigPath := configPath
-	if len(discovered) > 0 || (!fileExists(configPath) && tunnelID != "") {
+	if shouldGenerateConfig(fileExists(configPath), tunnelID) {
 		merged, err := writeMergedConfig(configPath, "/tmp/config.yml", discovered)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[discover] WARN: config generation failed, using base config: %v\n", err)
 		} else {
 			effectiveConfigPath = merged
-			if len(discovered) > 0 {
+			switch {
+			case len(discovered) > 0:
 				fmt.Printf("[discover] merged %d label-discovered rule(s) into %s\n", len(discovered), merged)
-			} else {
+			case !fileExists(configPath):
 				fmt.Printf("[entrypoint] no config.yml found; generated minimal config at %s\n", merged)
+			default:
+				// The common case now: nothing to merge, but the origin-request
+				// fix still had to be applied.
+				fmt.Printf("[entrypoint] prepared config at %s\n", merged)
 			}
 		}
 	}
