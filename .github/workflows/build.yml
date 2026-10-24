@@ -69,6 +69,9 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Point release notes at upstream; the wrapper has none of its own.
+          labels: |
+            org.opencontainers.image.source=https://github.com/cloudflare/cloudflared
           tags: |
             type=raw,value=${{ needs.detect.outputs.version }}-g${{ steps.vars.outputs.short_sha }},enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=${{ needs.detect.outputs.version }},enable=${{ github.ref == 'refs/heads/main' }}
@@ -81,6 +84,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: CLOUDFLARED_VERSION=${{ needs.detect.outputs.version }}
